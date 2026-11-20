@@ -570,6 +570,44 @@ func TestToTriageEvent_SeriesFallback(t *testing.T) {
 			wantFirst: t0,
 			wantLast:  t0,
 		},
+		{
+			name: "series zero count falls back to eventTime count 1",
+			mutate: func(ev *corev1.Event) {
+				ev.EventTime = metav1.MicroTime{Time: t1}
+				ev.Series = &corev1.EventSeries{
+					Count:            0,
+					LastObservedTime: metav1.MicroTime{Time: t2},
+				}
+			},
+			wantCount: 1,
+			wantFirst: t1,
+			wantLast:  t2,
+		},
+		{
+			name: "series negative count falls back to eventTime count 1",
+			mutate: func(ev *corev1.Event) {
+				ev.EventTime = metav1.MicroTime{Time: t1}
+				ev.Series = &corev1.EventSeries{
+					Count:            -3,
+					LastObservedTime: metav1.MicroTime{Time: t2},
+				}
+			},
+			wantCount: 1,
+			wantFirst: t1,
+			wantLast:  t2,
+		},
+		{
+			name: "series zero lastObservedTime falls back to eventTime",
+			mutate: func(ev *corev1.Event) {
+				ev.EventTime = metav1.MicroTime{Time: t1}
+				ev.Series = &corev1.EventSeries{
+					Count: 4,
+				}
+			},
+			wantCount: 4,
+			wantFirst: t1,
+			wantLast:  t1,
+		},
 	}
 
 	for _, tc := range cases {

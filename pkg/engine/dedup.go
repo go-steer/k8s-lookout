@@ -115,6 +115,15 @@ type dedupEntry struct {
 	// sibling pods of a rolling deployment share one repeat schedule
 	// and one coalesced recovery lifecycle (#641).
 	Parent *EventKey `json:"parent,omitempty"`
+	// replayAnchor is the memory-only wall-clock time of the latest
+	// pre-resolution finishSeries flush absorbed while this resolved
+	// entry was still inside its dedup window (#833). Kept separate
+	// from LastSeen so the entry still retires on its original window
+	// schedule (without prolonging session routing/joins), while
+	// retireLocked seeds the tombstone's TTL anchor from
+	// max(LastSeen, replayAnchor) to cover the API server's renewed
+	// 1-hour Event lease.
+	replayAnchor time.Time
 }
 
 // repeatState encapsulates the per-entry repeat/backoff schedule state
@@ -319,15 +328,21 @@ type DedupCache struct {
 	// lastSweep records when sweepExpiredLocked last pruned expired
 	// unbound/resolved entries (#643).
 	lastSweep time.Time
-	// tombstones remember, per key, the Event timestamp a retired
-	// resolved entry had last processed (issue #816). A resolved entry
-	// leaves the cache one window after its last activity, so that
-	// routing and joins stop reaching its session, but the Event behind
-	// it lives on in the API server for up to an hour and every relist
-	// re-delivers it. Without this, that re-delivery is a first sighting
-	// and re-opens an incident that is over. Memory only: after a
-	// restart the k8s-events source's ResourceVersion check covers the
-	// relists, and the informer's initial LIST is never emitted.
+	// tombstones remember, per key, the Event timestamp and wall-clock
+	// ResolvedAt of a retired resolved entry (issues #816, #833). A
+	// resolved entry leaves the cache one window after its last
+	// activity, so that routing and joins stop reaching its session,
+	// but the Event behind it lives on in the API server for up to an
+	// hour and every relist re-delivers it (and events.k8s.io/v1
+	// emitters may flush finishSeries 6-12m later with an advanced
+	// lastObservedTime that still predates resolution). Without this,
+	// that re-delivery or flush looks like a first sighting and
+	// re-opens an incident that is over. Memory only: after a restart
+	// the k8s-events source's ResourceVersion check covers unchanged
+	// relists and the informer's initial LIST is never emitted; a
+	// post-restart finishSeries write (which bumps RV) is covered by
+	// --dedup-persist's resolved_at while the entry is still live, but
+	// not once retired before the restart.
 	tombstones map[EventKey]tombstone
 }
 
@@ -627,16 +642,24 @@ type Observation struct {
 //
 //  0. **Replay of a retired incident** — no entry, but a tombstone
 //     says a resolved incident already processed this key's activity
-//     up to LastTS (issue #816). Suppressed with Replay set.
+//     up to EventLastTS (issue #816), or the incoming Event is a
+//     delayed finishSeries flush whose LastTS is not strictly after
+//     ResolvedAt (issue #833). Suppressed with Replay set (no session);
+//     a pre-resolution finishSeries flush refreshes EventLastTS and
+//     tomb.LastSeen once to cover the API server's renewed 1h Event
+//     lease.
 //
-//  1. **Replay** — LastTS is not later than the recorded
-//     EventLastTS. This is the k8s Event object being re-delivered
-//     (informer watch-rotation triggers a re-List; kube-apiserver
-//     rotates watch connections every ~15-25min in practice). The
-//     activity is one we've already processed — dedup, do NOT
-//     advance LastSeen (retry cooldown continues to age from real
-//     activity time). Bump count so metrics stay accurate. A replay
-//     never reaches the repeat schedule either.
+//  1. **Replay** — LastTS is not later than the recorded EventLastTS,
+//     or the entry is already resolved and LastTS is not strictly after
+//     ResolvedAt (#833). For an open entry, this is the k8s Event
+//     object being re-delivered (informer watch-rotation triggers a
+//     re-List; kube-apiserver rotates watch connections every ~15-25min
+//     in practice) — dedup, do NOT advance LastSeen (retry cooldown
+//     continues to age from real activity time), bump count, and never
+//     reach the repeat schedule. For a resolved live entry, both
+//     unchanged replays and pre-resolution finishSeries flushes return
+//     a session-less Replay duplicate so the dispatcher does not retry
+//     an open or emit a cross-source join.
 //
 //  2. **Still open** — LastTS is later, the entry is bound to a
 //     session by a session-class signal, this signal is session-class
@@ -687,7 +710,11 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 				// lastObservedTime predates resolution (issue #833):
 				// record the flushed Event timestamp and refresh the
 				// tombstone's TTL anchor for the apiserver's renewed
-				// Event lease, without opening an incident.
+				// Event lease, without opening an incident. Comparing
+				// emitter LastTS (second-granular on legacy Events) to
+				// sentinel wall-clock ResolvedAt may suppress a
+				// same-second recurrence once; the next event or
+				// resolved.reverted covers it.
 				tomb.EventLastTS = obs.LastTS
 				tomb.LastSeen = now
 				c.tombstones[key] = tomb
@@ -715,11 +742,16 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 		// Delayed finishSeries flush arriving before the resolved entry
 		// retired to a tombstone (issue #833). Suppress as Replay; if
 		// the entry was already past its retirement window (sweep not
-		// yet due), retire it now with the renewed TTL anchor.
+		// yet due), retire it now with the renewed TTL anchor. Otherwise
+		// record replayAnchor without bumping LastSeen so retirement
+		// stays on schedule while the tombstone still covers the renewed
+		// 1-hour Event lease.
 		entry.EventLastTS = obs.LastTS
 		if c.window > 0 && now.Sub(entry.LastSeen) > c.window {
 			entry.LastSeen = now
 			c.retireLocked(key, entry)
+		} else {
+			entry.replayAnchor = now
 		}
 		return DedupResult{Kind: DedupDuplicate, Count: entry.Count, Replay: true}
 	}
@@ -1380,10 +1412,14 @@ func (c *DedupCache) retireLocked(k EventKey, e *dedupEntry) {
 		}
 		delete(c.tombstones, oldest)
 	}
+	lastSeen := e.LastSeen
+	if e.replayAnchor.After(lastSeen) {
+		lastSeen = e.replayAnchor
+	}
 	c.tombstones[k] = tombstone{
 		EventLastTS: e.EventLastTS,
 		ResolvedAt:  e.ResolvedAt,
-		LastSeen:    e.LastSeen,
+		LastSeen:    lastSeen,
 	}
 }
 

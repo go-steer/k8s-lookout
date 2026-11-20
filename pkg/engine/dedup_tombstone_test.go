@@ -204,15 +204,46 @@ func TestDedup_FinishSeriesSuppressedBeforeRetirement(t *testing.T) {
 			t.Fatalf("Case 1 replay on resolved entry = %+v, want session-less Replay", got)
 		}
 
-		// finishSeries arrives at T+3m (< 5m window) carrying LastObservedTime=t3 <= resolvedAt.
-		now = t1.Add(3 * time.Minute)
+		// finishSeries arrives at T+4m50s (< 5m window) carrying LastObservedTime=t3 <= resolvedAt.
+		flushArrival := t1.Add(4*time.Minute + 50*time.Second)
+		now = flushArrival
 		got := c.ObserveSignal(key, obs(t3))
 		if got.Kind != DedupDuplicate || !got.Replay || got.SessionID != "" {
 			t.Fatalf("pre-retirement finishSeries (< window) = %+v, want session-less Replay", got)
 		}
-		// Entry stayed on its original LastSeen (t2) so retirement is not delayed.
-		if e := c.entries[key]; e == nil || !e.EventLastTS.Equal(t3) || !e.LastSeen.Equal(t2) {
-			t.Fatalf("entry after <window finishSeries = %+v, want EventLastTS=%s LastSeen=%s", e, t3, t2)
+		// Entry stayed on its original LastSeen (t2) so retirement is not delayed,
+		// while replayAnchor records flushArrival for the tombstone's renewed 1h lease.
+		if e := c.entries[key]; e == nil || !e.EventLastTS.Equal(t3) || !e.LastSeen.Equal(t2) || !e.replayAnchor.Equal(flushArrival) {
+			t.Fatalf("entry after <window finishSeries = %+v, want EventLastTS=%s LastSeen=%s replayAnchor=%s", e, t3, t2, flushArrival)
+		}
+
+		// Entry retires on schedule at T+5m03s (> 5m after t2), carrying flushArrival as tomb.LastSeen.
+		now = t2.Add(5*time.Minute + time.Second)
+		c.Sweep()
+		if _, live := c.entries[key]; live {
+			t.Fatal("resolved entry should retire on its original LastSeen schedule")
+		}
+		tomb, dead := c.tombstones[key]
+		if !dead || !tomb.LastSeen.Equal(flushArrival) || !tomb.EventLastTS.Equal(t3) {
+			t.Fatalf("retired tombstone = %+v (dead=%v), want EventLastTS=%s LastSeen=%s", tomb, dead, t3, flushArrival)
+		}
+
+		// Relist at flush+59m (> 1h after t2, < 1h after flushArrival): still suppressed as Replay
+		// and does not extend tomb.LastSeen.
+		now = flushArrival.Add(59 * time.Minute)
+		c.Sweep()
+		if got := c.ObserveSignal(key, obs(t3)); got.Kind != DedupDuplicate || !got.Replay || got.SessionID != "" {
+			t.Fatalf("relist at flush+59m = %+v, want session-less Replay", got)
+		}
+		if tomb := c.tombstones[key]; !tomb.LastSeen.Equal(flushArrival) {
+			t.Errorf("unchanged relist extended tomb.LastSeen to %s, want %s", tomb.LastSeen, flushArrival)
+		}
+
+		// Past 1h after flushArrival: tombstone expires cleanly.
+		now = flushArrival.Add(c.replayTTL() + time.Second)
+		c.Sweep()
+		if len(c.tombstones) != 0 {
+			t.Errorf("tombstones after renewed replay TTL = %d, want 0", len(c.tombstones))
 		}
 	})
 
@@ -372,6 +403,16 @@ func TestDedup_PostResolveActivityAfterResolvedAtOpensFresh(t *testing.T) {
 		r.c.lastSweep = r.now.Add(-time.Minute) // keep entry live in c.entries past window
 		if got := r.c.ObserveSignal(r.key, r.obs(r.now)); got.Kind != DedupNewIncident || got.Replay {
 			t.Fatalf("activity strictly after ResolvedAt (live lapsed entry) = %+v, want DedupNewIncident", got)
+		}
+	})
+
+	t.Run("within window on live resolved entry stays Case 4", func(t *testing.T) {
+		t.Parallel()
+		r := newTombRig(t)
+		r.now = r.now.Add(2 * time.Minute)
+		got := r.c.ObserveSignal(r.key, r.obs(r.now))
+		if got.Kind != DedupDuplicate || got.Replay || got.SessionID != "sess-1" {
+			t.Fatalf("activity strictly after ResolvedAt within window = %+v, want Case 4 DedupDuplicate{SessionID:sess-1, Replay:false}", got)
 		}
 	})
 }

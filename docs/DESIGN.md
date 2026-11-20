@@ -733,8 +733,22 @@ its agent re-diagnosed an unchanged failure each time. Now:
     the cache awaiting retirement). It has no session, and the dispatcher
     does not mistake it for a failed open to retry (#84/#96). When a
     pre-resolution `finishSeries` flush updates the Event in the API
-    server, the tombstone records the flushed timestamp and refreshes its
-    TTL anchor once to cover the Event's renewed 1-hour lease.
+    server, the cache records the flushed timestamp and refreshes the
+    tombstone's TTL anchor once (carried via an unpersisted replay anchor
+    when absorbed before retirement, so retirement timing stays unchanged)
+    to cover the Event's renewed 1-hour lease. Because emitter `LastTS`
+    (second-granular on legacy Events) is compared against sentinel
+    wall-clock `ResolvedAt`, a genuine recurrence within the same second
+    as resolution can be suppressed once; the next event or
+    `resolved.reverted` covers it. Two `finishSeries` residuals remain
+    outside the `ResolvedAt` guard because `MarkResolved` has not run yet:
+    (a) when recovery tracking is disabled (`--recovery-stable-for=0` or
+    no pod-read RBAC), a post-window flush falls through to Case 3 and
+    opens fresh; (b) when a flush arrives while the tracker is still in
+    `clearing` (before `--recovery-stable-for` elapses), Case 2 treats the
+    advanced timestamp as a `DedupRepeat` reminder into the existing
+    session. Both residuals are closed for `FailedScheduling` by #835's
+    pre-dedup `failedscheduling_not_pending` pod-state lookup.
   - An Event whose timestamp advances strictly past both the last
     processed timestamp and `ResolvedAt` clears the tombstone and opens a
     new incident like any first sighting.
