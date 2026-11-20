@@ -26,10 +26,10 @@
 . "$(dirname "$0")/../../lib.sh"
 require_examples_context
 
-stub_mark crash-blip
-
 echo "▸ redeploying sentinel with SETTLE=2m"
-SETTLE=2m "$(examples_root)/sentinel/up"
+SETTLE=2m sentinel_resync
+
+stub_mark crash-blip
 
 echo "▸ deploying crash-blip (4 non-zero exits via emptyDir marker, then stays Ready)"
 kubectl -n "$DEMO_NS" delete deployment crash-blip --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true

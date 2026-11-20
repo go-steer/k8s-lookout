@@ -139,12 +139,21 @@ func (t *settleTracker) BlipStart(sig engine.Signal, canonicalReason string, ret
 	now := t.clockLocked()
 	if c, ok := t.cleared[hk]; ok && now.Sub(c.At) <= t.clearedTTL {
 		if !sig.LastSeen.After(c.EventLastSeen) {
-			// Informer relist replay of the cleared blip — do not clamp.
-			return time.Time{}, false
+			// Redelivered sighting of a cleared blip (possibly on a reused
+			// Event whose old FirstSeen predates an earlier blip): clamp to
+			// sig.LastSeen so GateSettle holds it (span 0) and Hold declines
+			// to reopen a hold without consuming any #816 tombstone.
+			return sig.LastSeen, true
+		}
+		if !sig.FirstSeen.IsZero() && sig.FirstSeen.After(c.EventLastSeen) {
+			return sig.FirstSeen, true
 		}
 		return sig.LastSeen, true
 	}
 	if hasRetired && !retiredTS.IsZero() && sig.LastSeen.After(retiredTS) {
+		if !sig.FirstSeen.IsZero() && sig.FirstSeen.After(retiredTS) {
+			return sig.FirstSeen, true
+		}
 		return sig.LastSeen, true
 	}
 	return time.Time{}, false

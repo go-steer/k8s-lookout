@@ -20,4 +20,4 @@ echo "▸ removing crash-blip deployment"
 kubectl -n "$DEMO_NS" delete deployment crash-blip --ignore-not-found --wait=true --timeout=120s
 
 echo "▸ restoring sentinel with default --settle=0"
-SETTLE="" "$(examples_root)/sentinel/up"
+SETTLE="" sentinel_resync
