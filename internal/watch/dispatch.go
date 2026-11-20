@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/engine"
@@ -111,6 +112,19 @@ type dispatcher struct {
 	// The resolve flip (§9.4 automatic lifecycle) runs in every
 	// mode. Nil when --store is unset.
 	triage *triageOverrides
+	// excludes, when non-nil, holds the operator-declared
+	// --alert-excludes rules (#836). Evaluated in classifySignal AFTER
+	// d.routing.Classify and AFTER d.triage.Apply so an operator exclude
+	// file always outranks agent-written status=escalated or
+	// severity-upgrade triage records. Matching signals downgrade to
+	// SeverityInfo (RouteStore) without dropping the namespace or object
+	// from the watch.
+	excludes *alertExcludeStore
+	// settle, when non-nil, tracks keys held by engine.GateSettle (#834)
+	// so the dispatcher counts forwarded vs self_resolved outcomes and
+	// clamps repeat blips inside Event TTL to their own start. Nil when
+	// --settle=0 (the default).
+	settle *settleTracker
 	// storm, when non-nil, is the §7.5 correlation stage sitting
 	// between dedup and session creation: new incidents pass through
 	// it and may be folded into a kind=storm session instead of
@@ -186,11 +200,34 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		return
 	}
 
-	key, downgraded := d.classifySignal(ctx, &sig)
+	key, downgraded, excludedRule := d.classifySignal(ctx, &sig)
 	d.metrics.eventsSeen.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
-	if ok, gate := d.filter.Decide(sig); !ok {
+	filterSig := sig
+	var settleReason string
+	var blipStart time.Time
+	if d.settle != nil && isK8sEventSignal(sig.Kind) {
+		canonical := engine.CanonicalReasonForEvent(sig.Key.Reason, sig.Message)
+		if engine.SettleApplies(canonical, sig.Message) {
+			settleReason = canonical
+			retiredTS, hasRetired := d.dedup.LastRetiredTS(key)
+			if start, clamped := d.settle.BlipStart(sig, canonical, retiredTS, hasRetired); clamped {
+				blipStart = start
+				filterSig.FirstSeen = start
+			}
+		}
+	}
+	if ok, gate := d.filter.Decide(filterSig); !ok {
 		d.metrics.eventsFiltered.WithLabelValues(gate).Inc()
+		if gate == engine.GateSettle && settleReason != "" {
+			d.settle.Hold(sig, settleReason, blipStart)
+		}
 		return
+	}
+	if settleReason != "" && d.settle.Release(sig, settleReason) {
+		d.metrics.gateOutcomes.WithLabelValues(engine.GateSettle, settleOutcomeForwarded).Inc()
+	}
+	if excludedRule != nil {
+		d.metrics.alertExcluded.Inc()
 	}
 
 	result := d.dedup.ObserveSignal(key, engine.Observation{
@@ -200,6 +237,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		Message:    sig.Message,
 		Repeatable: d.opensSessions(sig),
 		Downgraded: downgraded != nil,
+		Excluded:   excludedRule != nil,
 	})
 	d.metrics.activeIncidents.Set(float64(d.dedup.ActiveBoundCount()))
 	if d.storm != nil && result.Storm != "" && (result.Kind == engine.DedupRepeat || result.Absorbed) {
@@ -210,7 +248,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		return
 	}
 	if result.Kind == engine.DedupDuplicate {
-		d.handleDuplicateSignal(ctx, sig, key, result, downgraded)
+		d.handleDuplicateSignal(ctx, sig, key, result, downgraded, excludedRule)
 		return
 	}
 
@@ -219,7 +257,7 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 	if d.triage != nil {
 		d.triage.windowRolled(key)
 	}
-	if d.routeInfoSignal(sig) {
+	if d.routeInfoSignal(sig, excludedRule) {
 		return
 	}
 	if d.correlateStormSignal(ctx, sig) {
@@ -235,6 +273,10 @@ func (d *dispatcher) DispatchSignal(ctx context.Context, sig engine.Signal) {
 		return
 	}
 	d.dispatchSharedOrDryRun(ctx, sig, key, result)
+}
+
+func isK8sEventSignal(kind string) bool {
+	return kind == engine.KindK8sEvent || kind == engine.KindK8sEventFollowup || kind == ""
 }
 
 func (d *dispatcher) stampClusterIdentity(sig *engine.Signal) {
@@ -255,7 +297,7 @@ func (d *dispatcher) stampClusterIdentity(sig *engine.Signal) {
 	}
 }
 
-func (d *dispatcher) classifySignal(ctx context.Context, sig *engine.Signal) (engine.EventKey, *memory.TriageStatusRecord) {
+func (d *dispatcher) classifySignal(ctx context.Context, sig *engine.Signal) (engine.EventKey, *memory.TriageStatusRecord, *AlertExcludeRule) {
 	key := sig.CanonicalKey()
 	sig.PullClass, sig.PullCause = d.pullClass.Resolve(*sig)
 	if sig.Fingerprint == "" {
@@ -269,10 +311,18 @@ func (d *dispatcher) classifySignal(ctx context.Context, sig *engine.Signal) (en
 	if d.triage != nil && d.mode == "per-incident" {
 		sig.Severity, downgraded = d.triage.Apply(ctx, *sig)
 	}
-	return key, downgraded
+	var excludedRule *AlertExcludeRule
+	if d.excludes != nil && d.mode == "per-incident" {
+		if rule, matched := d.excludes.Match(*sig); matched {
+			sig.Severity = engine.SeverityInfo
+			downgraded = nil
+			excludedRule = &rule
+		}
+	}
+	return key, downgraded, excludedRule
 }
 
-func (d *dispatcher) handleDuplicateSignal(ctx context.Context, sig engine.Signal, key engine.EventKey, result engine.DedupResult, downgraded *memory.TriageStatusRecord) {
+func (d *dispatcher) handleDuplicateSignal(ctx context.Context, sig engine.Signal, key engine.EventKey, result engine.DedupResult, downgraded *memory.TriageStatusRecord, excludedRule *AlertExcludeRule) {
 	d.metrics.eventsDedupSuppress.WithLabelValues(d.metrics.boundReason(sig.Key.Reason), d.metrics.boundNamespace(sig.Namespace)).Inc()
 	if result.Replay {
 		// Issues #816 / #833: either an unchanged Event relist or a
@@ -284,14 +334,19 @@ func (d *dispatcher) handleDuplicateSignal(ctx context.Context, sig engine.Signa
 		d.store.Record(sig, store.Outcome{Route: store.RouteSuppressed})
 		return
 	}
-	log.Printf("dedup %s pod=%s/%s (count=%d, window active)",
-		sig.Key.Reason, sig.Namespace, sig.Name, result.Count)
+	if excludedRule != nil {
+		log.Printf("dedup %s pod=%s/%s (count=%d, window active, excluded by --alert-excludes %s)",
+			sig.Key.Reason, sig.Namespace, sig.Name, result.Count, excludedRule.String())
+	} else {
+		log.Printf("dedup %s pod=%s/%s (count=%d, window active)",
+			sig.Key.Reason, sig.Namespace, sig.Name, result.Count)
+	}
 	if downgraded != nil && result.SessionID != "" {
 		if baseline, due := d.triage.noteRegression(key, result.Count); due {
 			d.injectTriageRegressed(ctx, sig, *downgraded, baseline, result)
 		}
 	}
-	if d.mode == "per-incident" && result.SessionID != "" && result.Storm == "" {
+	if excludedRule == nil && d.mode == "per-incident" && result.SessionID != "" && result.Storm == "" {
 		if openedBy, join := d.dedup.CrossSourceJoin(key, sig.Kind); join {
 			d.injectJoinFollowup(ctx, sig, result, key, openedBy)
 			return
@@ -308,18 +363,22 @@ func (d *dispatcher) handleDuplicateSignal(ctx context.Context, sig engine.Signa
 	d.store.Record(sig, store.Outcome{Route: store.RouteSuppressed, SessionID: result.SessionID})
 }
 
-func (d *dispatcher) routeInfoSignal(sig engine.Signal) bool {
-	if d.mode != "per-incident" || d.routing == nil || engine.RouteFor(sig.Severity) != engine.RouteStore {
+func (d *dispatcher) routeInfoSignal(sig engine.Signal, excludedRule *AlertExcludeRule) bool {
+	if d.mode != "per-incident" || (d.routing == nil && d.excludes == nil) || engine.RouteFor(sig.Severity) != engine.RouteStore {
 		return false
 	}
 	d.metrics.infoDropped.WithLabelValues(sig.Kind).Inc()
+	ruleNote := ""
+	if excludedRule != nil {
+		ruleNote = fmt.Sprintf(" via --alert-excludes %s", excludedRule.String())
+	}
 	if d.store != nil {
 		d.store.Record(sig, store.Outcome{Route: store.RouteInfoStored})
-		log.Printf("info-store %s %s/%s (severity=info: stored-only class; persisted to --store)",
-			sig.Kind, sig.Namespace, sig.Name)
+		log.Printf("info-store %s %s/%s (severity=info%s: stored-only class; persisted to --store)",
+			sig.Kind, sig.Namespace, sig.Name, ruleNote)
 	} else {
-		log.Printf("info-drop %s %s/%s (severity=info: stored-only class; set --store to persist — counted and dropped)",
-			sig.Kind, sig.Namespace, sig.Name)
+		log.Printf("info-drop %s %s/%s (severity=info%s: stored-only class; set --store to persist — counted and dropped)",
+			sig.Kind, sig.Namespace, sig.Name, ruleNote)
 	}
 	return true
 }
@@ -460,7 +519,7 @@ func (d *dispatcher) dispatchSharedOrDryRun(ctx context.Context, sig engine.Sign
 // escalated to critical still opens its own session.
 func (d *dispatcher) opensSessions(sig engine.Signal) bool {
 	return d.mode == "per-incident" &&
-		(d.routing == nil || engine.RouteFor(sig.Severity) != engine.RouteStore) &&
+		((d.routing == nil && d.excludes == nil) || engine.RouteFor(sig.Severity) != engine.RouteStore) &&
 		(d.board == nil || engine.RouteFor(sig.Severity) != engine.RouteWatchboard)
 }
 

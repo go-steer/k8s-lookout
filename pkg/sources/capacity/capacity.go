@@ -73,6 +73,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -197,6 +198,12 @@ type Config struct {
 	// ForecastCritETA: a projected time-to-full at or below it emits
 	// at severity critical. Default 1h.
 	ForecastCritETA time.Duration
+	// VerdictTTL is how long per-pod autoscaler verdicts
+	// (TriggeredScaleUp / NotTriggerScaleUp / FailedScaleUp) remain in
+	// the memo consulted by the FailedScheduling gate (#835). Zero takes
+	// the default floor (30m = 15m scaleup-hold + 15m stale window);
+	// callers should pass max(--dedup-window, --scaleup-hold + 15m).
+	VerdictTTL time.Duration
 }
 
 // DefaultConfig returns the shipped knobs.
@@ -211,6 +218,7 @@ func DefaultConfig() Config {
 		ForecastMinSamples: 10,
 		ForecastWarnETA:    4 * time.Hour,
 		ForecastCritETA:    1 * time.Hour,
+		VerdictTTL:         defaultScaleUpVerdictTTL,
 	}
 }
 
@@ -243,6 +251,9 @@ func (c Config) normalize() Config {
 	}
 	if c.ForecastCritETA <= 0 || c.ForecastCritETA >= c.ForecastWarnETA {
 		c.ForecastCritETA = d.ForecastCritETA
+	}
+	if c.VerdictTTL <= 0 {
+		c.VerdictTTL = d.VerdictTTL
 	}
 	return c
 }
@@ -312,10 +323,18 @@ type Source struct {
 	// map at startup must not read as "domain deleted").
 	forecastSampled bool
 	// podLister/nodeLister read the informer caches for the
-	// bin-packing sample; set by Run before the informers start, nil
-	// in unit tests that drive sampleCluster directly.
+	// bin-packing sample and the FailedScheduling pod-state point lookup;
+	// set by Run before the informers start, nil in unit tests that drive
+	// sampleCluster directly.
 	podLister  corelisters.PodLister
 	nodeLister corelisters.NodeLister
+	// verdicts caches per-pod autoscaler verdicts (TriggeredScaleUp,
+	// NotTriggerScaleUp, FailedScaleUp) recorded pre- and post-arming
+	// (#835). Guarded by its own mutex.
+	verdicts          *verdictMemo
+	rejectedVerdicts  atomic.Int64
+	rejectedLogs      rejectedLogMemo
+	onVerdictRejected func()
 	// statusMissing dedupes the "no status ConfigMap" log line.
 	statusMissing bool
 	// lastDecisions is the high-water mark of the provider
@@ -344,6 +363,7 @@ func New(client kubernetes.Interface, provider cloud.Provider, cfg Config) *Sour
 		gaps:    make(map[string]*gapEntry),
 		domains: make(map[domainKey]*domainSeries),
 	}
+	s.verdicts = newVerdictMemo(s.cfg.VerdictTTL, defaultScaleUpVerdictCap, s.clock)
 	if provider == nil {
 		provider = cloud.NoProvider
 	}
@@ -487,12 +507,19 @@ func (s *Source) Run(ctx context.Context, emit func(sources.Signal)) error {
 				s.onEvent(ev)
 			}
 		},
-		UpdateFunc: func(_, newObj any) {
-			// Count/LastTimestamp bump = another observation; the
-			// engine dedup decides what is a repeat.
-			if ev, ok := newObj.(*corev1.Event); ok {
-				s.onEvent(ev)
+		UpdateFunc: func(oldObj, newObj any) {
+			// Skip unchanged-ResourceVersion resync/relist redeliveries so
+			// relists do not re-count or re-log rejected verdicts or
+			// re-emit signals.
+			ev, ok := newObj.(*corev1.Event)
+			if !ok {
+				return
 			}
+			if oldEv, ok := oldObj.(*corev1.Event); ok &&
+				oldEv.ResourceVersion != "" && oldEv.ResourceVersion == ev.ResourceVersion {
+				return
+			}
+			s.onEvent(ev)
 		},
 	})
 	if err != nil {

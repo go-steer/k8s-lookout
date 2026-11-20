@@ -55,9 +55,15 @@ func eventSeverity(reason string) engine.Severity {
 	}
 }
 
-// onEvent is the Event informer handler: filter to the CA allow-list,
-// drop pre-arm history (package comment), convert, emit.
+// onEvent is the Event informer handler: record autoscaler verdicts
+// pre- and post-arming (#835), filter to the CA allow-list, drop pre-arm
+// signal emission (package comment), convert, emit.
 func (s *Source) onEvent(ev *corev1.Event) {
+	// Record per-pod autoscaler verdicts BEFORE the !armed check
+	// (matching trackPod in pending.go) so initial-LIST marks are on
+	// record ahead of live FailedScheduling events.
+	s.recordScaleUpVerdict(ev)
+
 	kind, ok := caEventKinds[ev.Reason]
 	if !ok {
 		return

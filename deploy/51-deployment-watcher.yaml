@@ -136,6 +136,31 @@ spec:
             # Occurrence store (§9.1): info-signal persistence, graph
             # history (--at post-mortems), triage-status records.
             - "--store=/var/lib/lookout/lookout.db"
+            # FailedScheduling autoscaler-verdict gate (#835, experimental):
+            # active automatically whenever the capacity source is enabled
+            # (defaults: --failedscheduling-min-count=5,
+            # --failedscheduling-min-span=2m, --scaleup-hold=15m,
+            # --autopilot-scale-to-zero-hold=true). Disable all four knobs
+            # to restore event-#1 pass-through:
+            #   - "--failedscheduling-min-count=1"
+            #   - "--failedscheduling-min-span=0"
+            #   - "--scaleup-hold=0"
+            #   - "--autopilot-scale-to-zero-hold=false"
+            # Alert-exclude rules (#836, experimental): mount a ConfigMap
+            # holding `excludes:` rules as a directory (do NOT use subPath —
+            # Kubernetes does not propagate ConfigMap updates to subPath
+            # mounts, which breaks hot-reload) and point --alert-excludes at
+            # it. Matching signals downgrade to severity=info (persisted in
+            # --store above) without dropping the namespace from the watch;
+            # hot-reloaded every 1m and on SIGHUP. Incompatible with --mode=shared.
+            #   - "--alert-excludes=/etc/lookout/alert-excludes.yaml"
+            # Settle gate (#834, experimental): opt-in duration (default 0 /
+            # off) requiring canonical CrashLoopBackOff and allowlisted
+            # transient Failed startup-race events to span at least --settle
+            # (LastSeen - FirstSeen) after crossing count debounce before
+            # forwarding; reports forwarded vs self_resolved on
+            # lookout_watch_gate_outcomes_total{gate="settle"}.
+            #   - "--settle=2m"
           volumeMounts:
             - name: lookout-data
               mountPath: /var/lib/lookout

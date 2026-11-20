@@ -62,6 +62,7 @@ DEFAULT_SCENARIOS=(
   failed-mount
   oom
   pending
+  pending-scaleup
   cert-expiry
   pdb-gridlock
   endpoints-empty

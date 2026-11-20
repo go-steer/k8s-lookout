@@ -75,7 +75,8 @@ Three surfaces to verify on, weakest to strongest:
 | `image-pull` | api rolled to nonexistent tag | `k8s-event` (ImagePull family, one fingerprint) | `triage events`, `triage changes` |
 | `failed-mount` | pod mounts missing ConfigMap | `k8s-event` FailedMount | `state edges` names the broken ref |
 | `oom` | memory leak vs 64Mi limit | `k8s-event` BackOff / `objectstate.restart_burst` | `triage events`, `triage logs` |
-| `pending` | 64-CPU request, unschedulable | `k8s-event` FailedScheduling + `capacity.pending-aged` | `triage events`, `health` pending category |
+| `pending` | 64-CPU request, unschedulable | `capacity.pending-aged` (`k8s-event` held on `failedscheduling_min_count`) | `triage events`, `health` pending category |
+| `pending-scaleup` | two sequential 64-CPU pods with `TriggeredScaleUp` / wrong-reporter / `NotTriggerScaleUp` | Pod A held (`scaleup_hold`); Pod B rejects `fake-controller` and opens `k8s-event` `FailedScheduling` (`count >= 1`) | sentinel `/metrics` (`scaleup_hold`, `scaleup_verdicts_rejected`) |
 | `cert-expiry` | TLS secret expiring in 48h | `expiry.warning` (critical, <72h) | `health` certs category |
 | `pdb-gridlock` | PDB headroom drops to 0 | `objectstate.pdb_gridlocked` | `stab drain -A` |
 | `endpoints-empty` | Service selector matches nothing | `objectstate.endpoints_empty` | `state edges` selected=0 |
@@ -88,19 +89,25 @@ Three surfaces to verify on, weakest to strongest:
 | `placement-drift` | replicas pinned to zone-a by a taint, then zone-b comes back (kind-only, explicit) | `leeway.contract_violated` (DoNotSchedule) + `leeway.placement_drift` (ScheduleAnyway), never `domain_unavailable` | sentinel `lookout_leeway_drift` metric |
 | `zone-unavailable` | zone-b's only node cordoned (kind-only, explicit) | exactly ONE `leeway.domain_unavailable` (`taint_exclusion`), no per-workload finding | sentinel `lookout_leeway_domains_unavailable` metric |
 | `gateway-cert` | Gateway HTTPS listener's cert-manager Certificate never issues (installs cert-manager + Envoy Gateway, explicit) | `expiry.warning` critical (`renewal=FAILED`) + `gateway.programming_failed` / `gateway.route_rejected` in the digest | `state gateway` names `listener=https`; the `http` listener stays programmed |
+| `crash-blip` | pod exits 4 times via `emptyDir` marker under `SETTLE=2m`, then stabilizes Ready (explicit, weekly) | zero `k8s-event` `BackOff` injects (held on `GateSettle`) | sentinel `/metrics` (`events_filtered{gate="settle"} >= 1`, `gate_outcomes{gate="settle",outcome="self_resolved"} >= 1`) |
 
 Each scenario's README explains the timeline, the manual-exploration
 commands, and an agent-harness prompt to try against it.
 
-`scenarios/` also holds ten **UAT fixtures** — `chatty-logs`,
+`scenarios/` also holds eleven **UAT fixtures** — `chatty-logs`,
 `broken-edges`, `broken-webhook`, `config-drift`, `drain-blockers`,
 `hpa-thrash`, `cpu-pressure`, `broken-workloads`, `secret-workload`,
-`store-postmortem`.
+`store-postmortem`, `alert-excludes`.
 Same three scripts, different job: nothing is expected on the wire and
 `examples/e2e` skips them. They exist to give a read-path command
 something to report — or, for `broken-workloads` and `secret-workload`,
 to make a shared cluster answerable at all: one namespace whose
 contents are known exactly, and one canary string consumed four ways.
+`alert-excludes` exercises `--alert-excludes` (#836) end-to-end by
+redeploying `examples/sentinel/up` with `ALERT_EXCLUDES` (which mounts a
+ConfigMap and turns on `--store`) and verifying that a crashing `worker`
+pod opens no `k8s-event` session while incrementing
+`lookout_watch_alert_excluded_total` and persisting an `info-stored` row.
 `store-postmortem` is the odd one out twice over: it breaks nothing and
 instead runs a local sentinel writing a graph history, so the `--at`
 commands have a cluster state that no longer exists to answer about,

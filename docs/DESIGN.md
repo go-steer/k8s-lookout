@@ -598,6 +598,104 @@ Filter, dedup, and the injector are extractions of the shipped
 `filter.go` / `dedup.go` / `injector.go` into `pkg/engine` and `pkg/inject`.
 Storm correlation, severity routing, and enrichment are new stages.
 
+#### `FailedScheduling` autoscaler-verdict gate (#835)
+
+When the `capacity` source is enabled, `pkg/engine.Filter` gates `k8s-event`
+`FailedScheduling` signals in strict order before dedup:
+
+1. **Fail-open pod-state point lookup** on `capacity`'s synced `podLister`:
+   bound (`spec.nodeName != ""` / `phase != Pending` / `PodScheduled=True`),
+   absent, or UID-mismatched pods hold as `failedscheduling_not_pending`
+   (blocking delayed `events.k8s.io/v1` `finishSeries` writes); Pending pods
+   with `PodScheduled=False` and `Reason != Unschedulable` (e.g.
+   `SchedulerError`, which neither `capacity.pending-aged` nor autoscaler
+   verdicts cover) pass immediately; Pending pods with `Reason=Unschedulable`
+   or no `PodScheduled=False` condition yet (informer cache lag) continue into
+   the gate.
+2. **Stale sighting hold** (`> 15m` since `LastSeen`, zero fails open) →
+   `failedscheduling_stale`.
+3. **Autoscaler verdict check** against `capacity`'s bounded per-cluster
+   `(namespace, uid)` verdict memo (4,096 entries with per-namespace fair
+   eviction, TTL `max(--dedup-window, --scaleup-hold + 15m)`, recorded
+   pre-arming from `cluster-autoscaler` `TriggeredScaleUp`,
+   `NotTriggerScaleUp`, and `FailedScaleUp` Pod events; keyed on
+   `metadata.namespace` after rejecting `involvedObject.namespace !=
+   metadata.namespace`, with same-second trigger vs decline ties delegated to
+   `pkg/leeway.LatestScaleUp` over 1 s-truncated timestamps):
+   - `NotTriggerScaleUp` / `FailedScaleUp` strictly predating `LastSeen` at 1 s
+     truncation (`sig.LastSeen.Truncate(1s) > verdict.At.Truncate(1s)`) passes
+     immediately;
+   - `TriggeredScaleUp` within `--scaleup-hold` (default `15m`) of `LastSeen`
+     holds as `scaleup_hold`.
+4. **Autopilot scale-to-zero hold** (`--autopilot-scale-to-zero-hold`, default
+   `true`): when `pkg/cloud.Provider`'s `ClusterConfig.Autopilot` is true
+   (absent provider / unavailable `ClusterConfig` fails open with an explicit
+   startup log line), an exact trimmed message `"no nodes available to schedule
+   pods"` with no autoscaler verdict holds as `autopilot_scale_to_zero`.
+5. **Count and span backstop**: `--failedscheduling-min-count` (default `5`;
+   `0` fails open, `1` disables) → `failedscheduling_min_count`, then
+   `--failedscheduling-min-span` (default `2m`; zero timestamps fail open, `0`
+   disables) → `failedscheduling_min_span`.
+
+**Safety boundaries:** if the `capacity` source is not enabled (e.g.
+`--sources=k8s-events` or `--sources=auto` skipping `capacity`), the entire
+gate auto-disables with one loud startup log line (and while `capacity`'s pod
+cache is not yet synced/armed, `PodSchedulingUnknown` fails open) so no pod is
+ever held up to 30 m on a series-only scheduler without `capacity.pending-aged`
+running as the safety net. Because `source.component` / `reportingController`
+is author-written (not authenticated by `kube-apiserver`), cross-namespace
+spoofing is blocked by rejecting `involvedObject.namespace !=
+metadata.namespace` and keying on `metadata.namespace`, while any
+same-namespace forged `cluster-autoscaler` `TriggeredScaleUp` mute is bounded
+at `max(15m, --pending-age)` by `capacity.pending-aged`, which reads Pod
+conditions rather than Events. Disabling all four `(experimental)` knobs
+disables the entire gate (including `not_pending` and `stale`), keeping
+event-#1 behavior reachable by flag. Per-pod gate decisions are logged at most
+once per 15 m unless the decision changes (bounded 50k-entry memo, suppressing
+overflow), while `lookout_events_filtered_total{gate}` counts every sighting.
+
+#### Settle gate (`--settle`, #834)
+
+To suppress transient crash-loop startup blips (such as kubelet object-cache
+warm-up races that cross `--backoff-min-count=3` in seconds and self-heal
+before 2 m) without reintroducing `#214`'s rejected deferred grace queue,
+`pkg/engine.Filter` supports an opt-in `(experimental)` age gate `--settle`
+(default `0` / disabled; e.g. `--settle=2m`). Running in `Filter.Decide`
+immediately after the count gates, it requires the Event's own sightings to
+span at least `--settle` (`sig.LastSeen.Sub(sig.FirstSeen) >= settle`, failing
+open when either timestamp is zero).
+
+- **Family scope (narrow by design):** applies **only** to `k8s-event` signals
+  whose message-aware canonical reason is `CrashLoopBackOff` (covering kubelet
+  repeating container-restart `BackOff` and `CrashLoopBackOff`, never
+  image-pull `BackOff`) or `Failed` matching two explicit transient startup-race
+  messages (`"Error: host IP unknown; known addresses:"` prefix, or
+  `"Error: open "` prefix + `"/etc-hosts: no such file or directory"` suffix).
+  `FailedMount`, `Unhealthy`, `ImagePullBackOff`, `ErrImagePull`,
+  `FailedScheduling`, `OOMKilled`, `Evicted`, `NodeNotReady`,
+  `NetworkNotReady`, and non-allowlisted `Failed` are explicitly exempt so
+  smoke-tier latency and storm correlation windows stay unaffected.
+- **Hold tracker, repeat-blip clamping, and outcomes:** when `--settle > 0`,
+  the dispatcher runs a bounded 4,096-entry per-cluster hold tracker that
+  records keys held by `GateSettle` (`gate="settle"`), counts
+  `lookout_watch_gate_outcomes_total{gate="settle",outcome="forwarded"}` when a
+  held key later lasts past `--settle`, and sweeps keys unsighted for
+  `settle + 5m` (kubelet's 300 s back-off ceiling) as `outcome="self_resolved"`
+  while storing a cleared tombstone (`EventLastSeen`). Before `Filter.Decide`,
+  the dispatcher checks both cleared-blip tombstones and a read-only
+  `DedupCache.LastRetiredTS(key)` lookup (which never mutates or deletes `#816`
+  replay tombstones): if `sig.LastSeen` is strictly after a prior cleared or
+  resolved sighting, a copy of `sig` with `FirstSeen` clamped to the new blip's
+  start is evaluated so repeat blips inside the 1 h Event TTL are settled from
+  their own start (leaving the wire payload's `FirstSeen` intact). Both the
+  hold tracker and `#816` tombstones are memory-only, so a sentinel restart
+  fails open on repeat-blip start. At `--settle=0` (default), the tracker is
+  inactive and `lookout_watch_gate_outcomes_total` stays silent. Live GKE 1.37
+  measurement (`shipmind-stage`, 2026-11-20) confirmed kubelet `BackOff` hits
+  `count=4` at `99s` inside `client-go`'s 25-event per-object burst bucket,
+  leaving a 4-exit blip cleanly below `2m` while the 5th `BackOff` (~179 s)
+  crosses `2m` without spam-filter throttling.
+
 ### 7.2 Signal sources
 
 Each source is a package under `pkg/sources` implementing:
@@ -740,15 +838,16 @@ its agent re-diagnosed an unchanged failure each time. Now:
     (second-granular on legacy Events) is compared against sentinel
     wall-clock `ResolvedAt`, a genuine recurrence within the same second
     as resolution can be suppressed once; the next event or
-    `resolved.reverted` covers it. Two `finishSeries` residuals remain
-    outside the `ResolvedAt` guard because `MarkResolved` has not run yet:
-    (a) when recovery tracking is disabled (`--recovery-stable-for=0` or
-    no pod-read RBAC), a post-window flush falls through to Case 3 and
-    opens fresh; (b) when a flush arrives while the tracker is still in
-    `clearing` (before `--recovery-stable-for` elapses), Case 2 treats the
-    advanced timestamp as a `DedupRepeat` reminder into the existing
-    session. Both residuals are closed for `FailedScheduling` by #835's
-    pre-dedup `failedscheduling_not_pending` pod-state lookup.
+    `resolved.reverted` covers it. Two `finishSeries` residuals outside the
+    `ResolvedAt` guard (because `MarkResolved` has not run yet) — (a) recovery
+    tracking disabled (`--recovery-stable-for=0` or no pod-read RBAC), where a
+    post-window flush falls through to Case 3, and (b) a flush arriving while
+    the tracker is still in `clearing` (before `--recovery-stable-for` elapses),
+    where Case 2 treats the advanced timestamp as a `DedupRepeat` reminder —
+    are closed for `FailedScheduling` whenever the `capacity` source is enabled
+    by `#835`'s pre-dedup `failedscheduling_not_pending` pod-state lookup (and
+    remain only when `capacity` is off or for non-`FailedScheduling`
+    series-only emitters).
   - An Event whose timestamp advances strictly past both the last
     processed timestamp and `ResolvedAt` clears the tombstone and opens a
     new incident like any first sighting.
@@ -846,6 +945,67 @@ modes become per-class:
 | `critical` | per-incident session (today's behavior), full enrichment |
 | `warning` | shared watchboard session, batched (rolling digest inject) |
 | `info` | stored only (§9.1); surfaced by read-path queries and digests |
+
+#### Alert-exclude rules (`--alert-excludes`, #836)
+
+Operators who want to quiet a noisy namespace or workload (for example a staging
+canary or load generator) without blinding the watch via `--exclude-namespace`
+or demoting an entire signal kind cluster-wide via `--severity kind=level` can
+pass `--alert-excludes <file>` (`(experimental)`). Following `pkg/exempt`'s
+principle that *exempt must not mean absent*, matching signals are never dropped
+from the informer or filtered out before dedup: they downgrade to
+`SeverityInfo` (`RouteStore`), persisting in `--store` when configured (and
+counting/logging via `info-drop` when `--store` is unset) without opening a
+session or watchboard entry.
+
+- **Strict YAML schema and alignments/amendments to `#234` (`pkg/exempt`):**
+  The file requires a top-level `excludes:` list (strict YAML unmarshaling
+  rejects unknown keys such as label selectors, missing wrappers, and
+  truncated files; `excludes: []` is valid). Every rule requires an
+  involved-object `kind` (case-insensitive, distinct from `--severity`'s signal
+  kind) **plus** at least one narrowing matcher (`namespace`, `reason`, or
+  `name`), rejecting `kind`-only rules alongside bare `*` or mid-string `*`.
+  `reason` matches both wire `Event.Reason` and message-aware canonical reasons
+  case-insensitively, refusing autoscaler verdict reasons (`TriggeredScaleUp`,
+  `NotTriggerScaleUp`, `FailedScaleUp`) at load time so rules cannot blind the
+  `FailedScheduling` verdict memo. `name` supports exact match or a trailing
+  `*` prefix (`loadgen-*`). Optional `cluster`, `project`, and `location`
+  (matching `Zone` or `Region`) scope rules in multi-cluster mode. Rules match
+  involved-object `kind` and canonical `reason` across **all** signal kinds —
+  so excluding `{kind: Pod, namespace: X, reason: FailedScheduling}` also
+  demotes `capacity.pending-aged` (whose canonical reason is
+  `FailedScheduling`), the safety-net pager for `#835`'s verdict gate. An
+  optional `owner`/`ControllerRef` matcher is intentionally omitted from this
+  first `(experimental)` release (trailing-`*` pod prefixes cover
+  Deployment/ReplicaSet pods cleanly, and `owner` stays additive if needed
+  later). Three explicit amendments to `#234` reflect watch-path operations:
+  ConfigMap-friendly hot-reload without restart (1 m ticker + `SIGHUP`), no
+  mandatory expiry or justification (replaced by per-rule startup/reload audit
+  log lines and Prometheus gauges), and trailing-`*` pod-name prefixes.
+- **Startup validation (exit 2) and precedence:** Missing, unreadable, or
+  malformed files at startup — and combining `--alert-excludes` with
+  `--mode=shared` (which ignores severity routing by frozen contract) — fail
+  with exit 2 (`emit.UsageErrorf`). Evaluation runs in `classifySignal` **after**
+  `d.routing.Classify` and **after** `d.triage.Apply`, so an operator-declared
+  exclude file always outranks an agent-written `status=escalated` or
+  severity-upgrade triage record and suppresses `triage.regressed` followups.
+- **Hot-reload and open-incident semantics:** On a malformed or unreadable
+  reload, the sentinel keeps the previously loaded valid rules in force (across
+  multi-cluster runner restarts as well), logs loudly, and sets
+  `lookout_watch_alert_exclude_refused = 1` (resetting to `0` on the next valid
+  reload). Dedicated metrics export `lookout_watch_alert_excluded_total`
+  (separate from `lookout_events_filtered_total`),
+  `lookout_watch_alert_exclude_rules`, and
+  `lookout_watch_alert_exclude_refused`, and `info-store`/`info-drop` logs
+  name the matched rule. When a hot-reloaded rule matches an already-open
+  session-class incident (`pkg/engine/dedup.go` Case 2), sightings stay
+  absorbed duplicates (recording `RouteSuppressed` against the bound session,
+  stopping further reminders and suppressing `CrossSourceJoin` followups)
+  instead of lapsing to an unbound Case 3 entry — refining `#836`'s original
+  Case-3 wording so the bound `SessionID` stays intact and `RecoveryTracker`
+  still delivers `kind=resolved` to the open session even after the dedup
+  window has elapsed. Once the incident resolves (or when no session is open),
+  excluded sightings route to `RouteStore` (`RouteInfoStored` / `info-drop`).
 
 #### Same-class owner folding (#583 / #600 / #601)
 
