@@ -154,6 +154,13 @@ spec:
             # --store above) without dropping the namespace from the watch;
             # hot-reloaded every 1m and on SIGHUP. Incompatible with --mode=shared.
             #   - "--alert-excludes=/etc/lookout/alert-excludes.yaml"
+            # Settle gate (#834, experimental): opt-in duration (default 0 /
+            # off) requiring canonical CrashLoopBackOff and allowlisted
+            # transient Failed startup-race events to span at least --settle
+            # (LastSeen - FirstSeen) after crossing count debounce before
+            # forwarding; reports forwarded vs self_resolved on
+            # lookout_watch_gate_outcomes_total{gate="settle"}.
+            #   - "--settle=2m"
           volumeMounts:
             - name: lookout-data
               mountPath: /var/lib/lookout

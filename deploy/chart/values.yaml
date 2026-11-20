@@ -141,6 +141,7 @@ args:
 
 # -- Extra flags appended after `args` above so callers can pass one or
 # two additional sentinel flags (`--kube-qps`, `--owner`, `--exclude-namespace`,
+# `--settle=2m` for the opt-in experimental settle gate,
 # `--alert-excludes=/etc/lookout/alert-excludes.yaml` paired with a directory
 # ConfigMap mount in `extraVolumes`/`extraVolumeMounts` — avoid `subPath`,
 # which Kubernetes never hot-reloads — or experimental FailedScheduling gate

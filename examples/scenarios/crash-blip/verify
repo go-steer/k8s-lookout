@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. "$(dirname "$0")/../../lib.sh"
+require_examples_context
+
+echo "▸ verify crash-blip"
+# Wait for the blip to cross --backoff-min-count=3 and enter GateSettle.
+await_metric_ge 240 'lookout_events_filtered_total' 'gate="settle"' 1
+
+# Wait for the 4-exit pod to stabilize Ready.
+kubectl -n "$DEMO_NS" wait --for=condition=Ready pod -l app=crash-blip --timeout=240s
+
+# Wait for the settle hold tracker to sweep the quiet key as self_resolved
+# (settle=2m + 5m quiet slack + 30s sweep interval ≈ 7m30s; scaled by
+# LOOKOUT_E2E_TIMEOUT_SCALE in CI).
+await_metric_ge 600 'lookout_watch_gate_outcomes_total' 'gate="settle",outcome="self_resolved"' 1
+
+wire_count="$(leeway_wire_count crash-blip 'kind=k8s-event' 'BackOff|CrashLoopBackOff' 'crash-blip-')"
+if [[ "$wire_count" -ne 0 ]]; then
+  echo "  ✗ crash-blip opened ${wire_count} k8s-event BackOff inject(s), want 0" >&2
+  stub_since crash-blip | grep -E 'kind=k8s-event' | tail -n 10 >&2 || true
+  exit 1
+fi
+echo "  ✓ crash-blip suppressed on GateSettle and swept self_resolved with 0 k8s-event injects"

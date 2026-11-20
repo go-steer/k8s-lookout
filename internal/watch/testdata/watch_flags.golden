@@ -74,6 +74,7 @@ saturation-interval	duration	"30s"	stable
 saturation-warn	duration	"1h0m0s"	stable
 saturation-window	duration	"1h30m0s"	stable
 scaleup-hold	duration	"15m0s"	experimental
+settle	duration	"0s"	experimental
 severity	repeatable	""	stable
 sink	string	"core-agent"	stable
 sink-token-env	string	""	stable

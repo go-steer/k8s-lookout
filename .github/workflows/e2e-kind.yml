@@ -21,10 +21,12 @@ name: E2E (kind)
 #   - push to main   → smoke: crashloop + failed-mount + bad-rollout
 #                      (~10 min: reactive events, state edges, rollout
 #                      source, recovery closed loop)
-#   - weekly / manual → the full non-destructive set, the leeway
-#                      placement pair, gateway-cert, then node-failure
-#                      (~50 min). gateway-cert installs and removes
-#                      cert-manager + Envoy Gateway, too heavy for smoke.
+#   - weekly / manual → the full non-destructive set (incl. pending-scaleup),
+#                      the leeway placement pair, gateway-cert, crash-blip,
+#                      then node-failure (~65 min). gateway-cert installs and
+#                      removes cert-manager + Envoy Gateway and crash-blip
+#                      toggles SETTLE=2m and waits out the settle+5m sweep,
+#                      both too heavy for smoke.
 #
 # Both tiers then run the T1 CLI UAT (examples/uat) against the same
 # cluster — the read-path half of the layer, per docs/testing/cli-uat.md.
@@ -49,7 +51,7 @@ on:
   workflow_dispatch:
     inputs:
       scenarios:
-        description: 'space-separated scenarios (empty = full set + leeway pair + gateway-cert + node-failure)'
+        description: 'space-separated scenarios (empty = full set + leeway pair + gateway-cert + crash-blip + node-failure)'
         required: false
         default: ''
   push:
@@ -72,7 +74,7 @@ concurrency:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 90
     env:
       # CI runners are slower than the workstation the timings were
       # calibrated on; doubles every verify-script await window.
@@ -118,6 +120,7 @@ jobs:
                 examples/e2e
                 examples/e2e placement-drift zone-unavailable
                 examples/e2e gateway-cert
+                examples/e2e crash-blip
                 examples/e2e node-failure
               fi
               ;;
@@ -125,12 +128,13 @@ jobs:
               # The leeway pair before node-failure, never after: a
               # stopped worker2 leaves zone-b's domain finding open for
               # the 30m resolve dwell, and zone-unavailable would then
-              # have nothing new to put on the wire. gateway-cert
-              # restarts the sentinel (on inject and on revert), so it
-              # runs after the leeway pair rather than between them.
+              # have nothing new to put on the wire. gateway-cert and
+              # crash-blip restart the sentinel (on inject and on revert),
+              # so they run after the leeway pair rather than between them.
               examples/e2e
               examples/e2e placement-drift zone-unavailable
               examples/e2e gateway-cert
+              examples/e2e crash-blip
               examples/e2e node-failure
               ;;
           esac

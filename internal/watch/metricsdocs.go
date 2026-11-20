@@ -69,6 +69,7 @@ func MetricsInventory() []MetricDoc {
 		{m.eventsInjected, "counter", []string{"reason", "namespace"}},
 		{m.eventsDedupSuppress, "counter", []string{"reason", "namespace"}},
 		{m.eventsFiltered, "counter", []string{"gate"}},
+		{m.gateOutcomes, "counter", []string{"gate", "outcome"}},
 		{m.scaleUpVerdictsRejected, "counter", nil},
 		{m.alertExcluded, "counter", nil},
 		{m.alertExcludeRules, "gauge", nil},

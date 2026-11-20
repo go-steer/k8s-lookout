@@ -722,7 +722,7 @@ func (r *runner) run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount, f.backoffMinCount, f.imagePullTransientMin)
+	filterCfg := engine.NewFilterConfig(splitCSV(f.reasons), splitCSV(f.namespaces), splitCSV(f.excludeNamespaces), f.unhealthyMinCount, f.backoffMinCount, f.imagePullTransientMin).WithSettle(f.settle)
 	filter := engine.NewFilter(filterCfg)
 
 	dedup, err := engine.NewDedupCache(f.dedupWindow, f.dedupPersist)
@@ -927,6 +927,12 @@ func (r *runner) wireDispatcherRoutingAndLoops(
 ) func() {
 	m := r.metrics
 	disp.routing = engine.NewRoutingPolicy(f.severityOverrides)
+	if f.settle > 0 {
+		disp.settle = newSettleTracker(f.settle, max(f.dedupWindow, defaultSettleClearedTTL))
+		go runSettleSweepLoop(ctx, disp.settle, m)
+		log.Printf("settle: gate enabled (--settle=%s, quiet slack=%s; family=CrashLoopBackOff + allowlisted transient Failed; outcomes on lookout_watch_gate_outcomes_total)",
+			f.settle, settleQuietSlack)
+	}
 	if f.alertExcludes != "" {
 		if r.excludes == nil {
 			r.excludes = newAlertExcludeStore(f.alertExcludes, f.alertExcludeRules, f.alertExcludeRaw, m, nil)

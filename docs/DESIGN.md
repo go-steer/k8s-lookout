@@ -654,6 +654,48 @@ event-#1 behavior reachable by flag. Per-pod gate decisions are logged at most
 once per 15 m unless the decision changes (bounded 50k-entry memo, suppressing
 overflow), while `lookout_events_filtered_total{gate}` counts every sighting.
 
+#### Settle gate (`--settle`, #834)
+
+To suppress transient crash-loop startup blips (such as kubelet object-cache
+warm-up races that cross `--backoff-min-count=3` in seconds and self-heal
+before 2 m) without reintroducing `#214`'s rejected deferred grace queue,
+`pkg/engine.Filter` supports an opt-in `(experimental)` age gate `--settle`
+(default `0` / disabled; e.g. `--settle=2m`). Running in `Filter.Decide`
+immediately after the count gates, it requires the Event's own sightings to
+span at least `--settle` (`sig.LastSeen.Sub(sig.FirstSeen) >= settle`, failing
+open when either timestamp is zero).
+
+- **Family scope (narrow by design):** applies **only** to `k8s-event` signals
+  whose message-aware canonical reason is `CrashLoopBackOff` (covering kubelet
+  repeating container-restart `BackOff` and `CrashLoopBackOff`, never
+  image-pull `BackOff`) or `Failed` matching two explicit transient startup-race
+  messages (`"Error: host IP unknown; known addresses:"` prefix, or
+  `"Error: open "` prefix + `"/etc-hosts: no such file or directory"` suffix).
+  `FailedMount`, `Unhealthy`, `ImagePullBackOff`, `ErrImagePull`,
+  `FailedScheduling`, `OOMKilled`, `Evicted`, `NodeNotReady`,
+  `NetworkNotReady`, and non-allowlisted `Failed` are explicitly exempt so
+  smoke-tier latency and storm correlation windows stay unaffected.
+- **Hold tracker, repeat-blip clamping, and outcomes:** when `--settle > 0`,
+  the dispatcher runs a bounded 4,096-entry per-cluster hold tracker that
+  records keys held by `GateSettle` (`gate="settle"`), counts
+  `lookout_watch_gate_outcomes_total{gate="settle",outcome="forwarded"}` when a
+  held key later lasts past `--settle`, and sweeps keys unsighted for
+  `settle + 5m` (kubelet's 300 s back-off ceiling) as `outcome="self_resolved"`
+  while storing a cleared tombstone (`EventLastSeen`). Before `Filter.Decide`,
+  the dispatcher checks both cleared-blip tombstones and a read-only
+  `DedupCache.LastRetiredTS(key)` lookup (which never mutates or deletes `#816`
+  replay tombstones): if `sig.LastSeen` is strictly after a prior cleared or
+  resolved sighting, a copy of `sig` with `FirstSeen` clamped to the new blip's
+  start is evaluated so repeat blips inside the 1 h Event TTL are settled from
+  their own start (leaving the wire payload's `FirstSeen` intact). Both the
+  hold tracker and `#816` tombstones are memory-only, so a sentinel restart
+  fails open on repeat-blip start. At `--settle=0` (default), the tracker is
+  inactive and `lookout_watch_gate_outcomes_total` stays silent. Live GKE 1.37
+  measurement (`shipmind-stage`, 2026-11-20) confirmed kubelet `BackOff` hits
+  `count=4` at `99s` inside `client-go`'s 25-event per-object burst bucket,
+  leaving a 4-exit blip cleanly below `2m` while the 5th `BackOff` (~179 s)
+  crosses `2m` without spam-filter throttling.
+
 ### 7.2 Signal sources
 
 Each source is a package under `pkg/sources` implementing:
