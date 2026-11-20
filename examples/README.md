@@ -75,7 +75,7 @@ Three surfaces to verify on, weakest to strongest:
 | `image-pull` | api rolled to nonexistent tag | `k8s-event` (ImagePull family, one fingerprint) | `triage events`, `triage changes` |
 | `failed-mount` | pod mounts missing ConfigMap | `k8s-event` FailedMount | `state edges` names the broken ref |
 | `oom` | memory leak vs 64Mi limit | `k8s-event` BackOff / `objectstate.restart_burst` | `triage events`, `triage logs` |
-| `pending` | 64-CPU request, unschedulable | `capacity.pending-aged` | `health` pending category |
+| `pending` | 64-CPU request, unschedulable | `k8s-event` FailedScheduling + `capacity.pending-aged` | `triage events`, `health` pending category |
 | `cert-expiry` | TLS secret expiring in 48h | `expiry.warning` (critical, <72h) | `health` certs category |
 | `pdb-gridlock` | PDB headroom drops to 0 | `objectstate.pdb_gridlocked` | `stab drain -A` |
 | `endpoints-empty` | Service selector matches nothing | `objectstate.endpoints_empty` | `state edges` selected=0 |

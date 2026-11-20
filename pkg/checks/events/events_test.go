@@ -411,3 +411,155 @@ func TestWorkloadTimelineReplicaSetsRefused(t *testing.T) {
 		t.Errorf("contract: %v", err)
 	}
 }
+
+// TestSeriesFallback verifies issue #833 on the read path (`triage events`):
+// events.k8s.io/v1 series-only Events populate count and last_seen from
+// Series.{Count,LastObservedTime} (so an Event whose EventTime predates
+// --since still survives when Series.LastObservedTime is fresh), first
+// occurrences with Series == nil report count=1, and legacy fields win when
+// both are populated.
+func TestSeriesFallback(t *testing.T) {
+	objs := []runtime.Object{
+		// 1. Series-only repeat whose EventTime (40m ago) is older than --since=15m
+		//    but Series.LastObservedTime (2m ago) is inside the window.
+		&corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Namespace: "prod", Name: "ev-series-repeat"},
+			InvolvedObject: objRef("Pod", "prod", "hog-repeat", "u-repeat"),
+			Type:           corev1.EventTypeWarning,
+			Reason:         "FailedScheduling",
+			Message:        "0/3 nodes are available: 3 Insufficient cpu.",
+			EventTime:      metav1.MicroTime{Time: testNow.Add(-40 * time.Minute)},
+			Series: &corev1.EventSeries{
+				Count:            9,
+				LastObservedTime: metav1.MicroTime{Time: testNow.Add(-2 * time.Minute)},
+			},
+			ReportingController: "default-scheduler",
+		},
+		// 2. Series-only first occurrence (EventTime set, Series == nil, Count == 0).
+		&corev1.Event{
+			ObjectMeta:          metav1.ObjectMeta{Namespace: "prod", Name: "ev-series-first"},
+			InvolvedObject:      objRef("Pod", "prod", "hog-first", "u-first"),
+			Type:                corev1.EventTypeWarning,
+			Reason:              "FailedScheduling",
+			Message:             "0/3 nodes are available: 3 Insufficient memory.",
+			EventTime:           metav1.MicroTime{Time: testNow.Add(-5 * time.Minute)},
+			ReportingController: "default-scheduler",
+		},
+		// 3. Both legacy and Series populated: legacy Count and LastTimestamp win.
+		&corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Namespace: "prod", Name: "ev-both"},
+			InvolvedObject: objRef("Pod", "prod", "hog-both", "u-both"),
+			Type:           corev1.EventTypeWarning,
+			Reason:         "FailedScheduling",
+			Message:        "0/3 nodes are available: legacy wins.",
+			Count:          7,
+			FirstTimestamp: ago(10 * time.Minute),
+			LastTimestamp:  ago(3 * time.Minute),
+			EventTime:      metav1.MicroTime{Time: testNow.Add(-10 * time.Minute)},
+			Series: &corev1.EventSeries{
+				Count:            2,
+				LastObservedTime: metav1.MicroTime{Time: testNow.Add(-1 * time.Minute)},
+			},
+			Source: corev1.EventSource{Component: "default-scheduler"},
+		},
+		// 4. Series with Count == 0 clamps to 1 while honoring Series.LastObservedTime.
+		&corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Namespace: "prod", Name: "ev-series-zero-count"},
+			InvolvedObject: objRef("Pod", "prod", "hog-zero-count", "u-zero-count"),
+			Type:           corev1.EventTypeWarning,
+			Reason:         "FailedScheduling",
+			Message:        "0/3 nodes are available: zero series count.",
+			EventTime:      metav1.MicroTime{Time: testNow.Add(-40 * time.Minute)},
+			Series: &corev1.EventSeries{
+				Count:            0,
+				LastObservedTime: metav1.MicroTime{Time: testNow.Add(-4 * time.Minute)},
+			},
+			ReportingController: "default-scheduler",
+		},
+		// 5. Series with negative Count clamps to 1 while honoring Series.LastObservedTime.
+		&corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Namespace: "prod", Name: "ev-series-neg-count"},
+			InvolvedObject: objRef("Pod", "prod", "hog-neg-count", "u-neg-count"),
+			Type:           corev1.EventTypeWarning,
+			Reason:         "FailedScheduling",
+			Message:        "0/3 nodes are available: negative series count.",
+			EventTime:      metav1.MicroTime{Time: testNow.Add(-40 * time.Minute)},
+			Series: &corev1.EventSeries{
+				Count:            -3,
+				LastObservedTime: metav1.MicroTime{Time: testNow.Add(-6 * time.Minute)},
+			},
+			ReportingController: "default-scheduler",
+		},
+		// 6. Series with zero LastObservedTime falls back to EventTime while reading Series.Count.
+		&corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Namespace: "prod", Name: "ev-series-zero-ts"},
+			InvolvedObject: objRef("Pod", "prod", "hog-zero-ts", "u-zero-ts"),
+			Type:           corev1.EventTypeWarning,
+			Reason:         "FailedScheduling",
+			Message:        "0/3 nodes are available: zero series timestamp.",
+			EventTime:      metav1.MicroTime{Time: testNow.Add(-7 * time.Minute)},
+			Series: &corev1.EventSeries{
+				Count: 4,
+			},
+			ReportingController: "default-scheduler",
+		},
+	}
+
+	recs, summary := runRecords(t, testCommand(objs...), "--namespace=prod", "--since=15m", "--per-object")
+	if summary["scanned"] != "6" {
+		t.Errorf("scanned = %s, want 6", summary["scanned"])
+	}
+	if len(recs) != 6 {
+		t.Fatalf("findings = %d, want 6 (series repeats must survive --since=15m):\n%v", len(recs), recs)
+	}
+	byName := make(map[string]record, len(recs))
+	for _, r := range recs {
+		byName[r["name"]] = r
+	}
+
+	rep := byName["hog-repeat"]
+	if rep["count"] != "9" {
+		t.Errorf("hog-repeat count = %q, want 9", rep["count"])
+	}
+	if rep["first_seen"] != ago(40*time.Minute).UTC().Format(time.RFC3339) {
+		t.Errorf("hog-repeat first_seen = %q, want %s", rep["first_seen"], ago(40*time.Minute).UTC().Format(time.RFC3339))
+	}
+	if rep["last_seen"] != ago(2*time.Minute).UTC().Format(time.RFC3339) {
+		t.Errorf("hog-repeat last_seen = %q, want %s", rep["last_seen"], ago(2*time.Minute).UTC().Format(time.RFC3339))
+	}
+
+	first := byName["hog-first"]
+	if first["count"] != "1" {
+		t.Errorf("hog-first count = %q, want 1", first["count"])
+	}
+	wantFirstTS := ago(5 * time.Minute).UTC().Format(time.RFC3339)
+	if first["first_seen"] != wantFirstTS || first["last_seen"] != wantFirstTS {
+		t.Errorf("hog-first first_seen/last_seen = %q/%q, want both %s", first["first_seen"], first["last_seen"], wantFirstTS)
+	}
+
+	both := byName["hog-both"]
+	if both["count"] != "7" {
+		t.Errorf("hog-both count = %q, want 7 (legacy wins)", both["count"])
+	}
+	if both["last_seen"] != ago(3*time.Minute).UTC().Format(time.RFC3339) {
+		t.Errorf("hog-both last_seen = %q, want %s (legacy wins)", both["last_seen"], ago(3*time.Minute).UTC().Format(time.RFC3339))
+	}
+
+	zeroCount := byName["hog-zero-count"]
+	if zeroCount["count"] != "1" || zeroCount["last_seen"] != ago(4*time.Minute).UTC().Format(time.RFC3339) {
+		t.Errorf("hog-zero-count = (count=%q, last_seen=%q), want (1, %s)", zeroCount["count"], zeroCount["last_seen"], ago(4*time.Minute).UTC().Format(time.RFC3339))
+	}
+
+	negCount := byName["hog-neg-count"]
+	if negCount["count"] != "1" || negCount["last_seen"] != ago(6*time.Minute).UTC().Format(time.RFC3339) {
+		t.Errorf("hog-neg-count = (count=%q, last_seen=%q), want (1, %s)", negCount["count"], negCount["last_seen"], ago(6*time.Minute).UTC().Format(time.RFC3339))
+	}
+
+	zeroTS := byName["hog-zero-ts"]
+	wantZeroTS := ago(7 * time.Minute).UTC().Format(time.RFC3339)
+	if zeroTS["count"] != "4" || zeroTS["last_seen"] != wantZeroTS {
+		t.Errorf("hog-zero-ts = (count=%q, last_seen=%q), want (4, %s)", zeroTS["count"], zeroTS["last_seen"], wantZeroTS)
+	}
+
+	checktest.VerifyContract(t, testCommand(objs...), "--namespace=prod", "--since=15m")
+}

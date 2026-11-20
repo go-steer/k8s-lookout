@@ -1029,8 +1029,9 @@ func TestRepeatState_TransitionsAndWireCompatibility(t *testing.T) {
 	if rs.Undelivered || rs.Step != 0 || rs.RepeatCount != 0 || rs.LastChange != RepeatChangeOpen {
 		t.Fatalf("resetForUnbind = %+v", rs)
 	}
-	rs.markResolved()
-	if !rs.Resolved {
-		t.Fatalf("markResolved did not set Resolved")
+	t4 := t3.Add(2 * time.Minute)
+	rs.markResolved(t4)
+	if !rs.Resolved || !rs.ResolvedAt.Equal(t4) {
+		t.Fatalf("markResolved = (Resolved=%v, ResolvedAt=%s), want (true, %s)", rs.Resolved, rs.ResolvedAt, t4)
 	}
 }

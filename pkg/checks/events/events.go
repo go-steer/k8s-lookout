@@ -376,10 +376,7 @@ func accumulate(timeline map[engine.EventKey]*entry, ev *corev1.Event, first, la
 	// BackOff/Failed reasons land in the same family the sentinel's
 	// dedup cache files them under (pull vs crash-loop).
 	key := engine.EventKey{UID: uid, Reason: engine.CanonicalReasonForEvent(ev.Reason, ev.Message)}
-	count := int(ev.Count)
-	if count < 1 {
-		count = 1
-	}
+	count := eventCount(ev)
 	en, ok := timeline[key]
 	if !ok {
 		en = &entry{
@@ -470,9 +467,25 @@ func (en *entry) finding() emit.Finding {
 	return f
 }
 
+// eventCount returns an Event's occurrence count, preferring legacy
+// core/v1 Count and falling back to events.k8s.io/v1 Series.Count
+// (issue #833). A listed Event object represents at least one
+// occurrence, so missing or non-positive counts floor to 1.
+func eventCount(ev *corev1.Event) int {
+	count := int(ev.Count)
+	if count <= 0 && ev.Series != nil && ev.Series.Count > 0 {
+		count = int(ev.Series.Count)
+	}
+	if count < 1 {
+		count = 1
+	}
+	return count
+}
+
 // eventTimes normalizes an Event's activity interval, preferring
-// LastTimestamp and falling back to EventTime / CreationTimestamp —
-// the same convention as the watch-path's k8s-events source.
+// LastTimestamp and falling back to Series.LastObservedTime, EventTime,
+// and CreationTimestamp — the same convention as the watch-path's
+// k8s-events source (issue #833).
 func eventTimes(ev *corev1.Event) (first, last time.Time) {
 	first = ev.FirstTimestamp.Time
 	if first.IsZero() {
@@ -482,6 +495,9 @@ func eventTimes(ev *corev1.Event) (first, last time.Time) {
 		first = ev.CreationTimestamp.Time
 	}
 	last = ev.LastTimestamp.Time
+	if last.IsZero() && ev.Series != nil {
+		last = ev.Series.LastObservedTime.Time
+	}
 	if last.IsZero() {
 		last = ev.EventTime.Time
 	}

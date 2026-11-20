@@ -16,9 +16,10 @@ examples/scenarios/pending/revert
 
 ## What to expect
 
-- **Sentinel (wire)** — `kind=capacity.pending-aged` after
-  ~75s + one capacity poll (60s), naming the pod and how long it has
-  been unschedulable.
+- **Sentinel (wire)** — `kind=k8s-event` (`FailedScheduling`, `count >= 1`
+  from upstream series-only `kube-scheduler`), followed by
+  `kind=capacity.pending-aged` after ~75s + one capacity poll (60s),
+  naming the pod and how long it has been unschedulable.
 - **Read-path** — `lookout health` scores the pending category
   degraded; `lookout triage events --namespace=lookout-demo` shows
   the scheduler's `FailedScheduling` verdicts.

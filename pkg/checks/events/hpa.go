@@ -59,7 +59,7 @@ func newRescale(ev *corev1.Event, first, last time.Time) rescale {
 		message:   ev.Message,
 		first:     first,
 		last:      last,
-		count:     int(ev.Count),
+		count:     eventCount(ev),
 	}
 }
 
