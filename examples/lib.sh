@@ -521,6 +521,25 @@ leeway_wire_count() {
   wc -l <<<"$out" | tr -d ' '
 }
 
+# sentinel_resync — re-run examples/sentinel/up with the image the
+# sentinel is ALREADY running, then force a pod restart.
+#
+# Re-running sentinel/up bare would swap the image back to its GHCR
+# default, which in CI (kind/up --build) is the wrong binary and lacks
+# flags added on HEAD. Callers toggling optional env vars (ALERT_EXCLUDES,
+# SETTLE) pass them in this command's environment.
+sentinel_resync() {
+  local image
+  image="$(kubectl -n "$SENTINEL_NS" get deployment lookout-watch \
+    -o jsonpath='{.spec.template.spec.containers[0].image}')"
+  echo "▸ re-running sentinel/up with the running image ($image)"
+  LOOKOUT_IMAGE="$image" "$(examples_root)/sentinel/up" >/dev/null
+  # sentinel/up only rolls the pod when the pod template changed; force a
+  # restart so startup discovery / flag transitions always apply.
+  kubectl -n "$SENTINEL_NS" rollout restart deployment/lookout-watch >/dev/null
+  kubectl -n "$SENTINEL_NS" rollout status deployment/lookout-watch --timeout=180s >/dev/null
+}
+
 # sentinel_metrics — fetch the in-cluster sentinel's Prometheus /metrics text.
 # Uses kube-apiserver service proxy first and falls back to scraping from
 # stub-daemon (same namespace, admitted by deploy/16-networkpolicy-watcher.yaml).
