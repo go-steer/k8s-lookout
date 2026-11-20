@@ -624,6 +624,13 @@ type Observation struct {
 	// legacy lapse (to the store or watchboard) instead of being
 	// absorbed: the agent asked for exactly that.
 	Downgraded bool
+	// Excluded marks a signal downgraded to SeverityInfo by an operator
+	// --alert-excludes rule (#836). On an already-open session-class
+	// incident, an excluded sighting stays an absorbed duplicate so the
+	// bound SessionID remains intact for §7.4 RecoveryTracker resolution
+	// while stopping further reminders; once the incident resolves (or
+	// when no session is open), excluded sightings route to RouteStore.
+	Excluded bool
 }
 
 // ObserveSignal records that key was just seen and returns a
@@ -792,7 +799,7 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 					Absorbed:  lastInject.After(root.FirstSeen) || parentLapsed,
 				}
 			}
-			if !obs.Downgraded && obs.Kind != root.SourceKind {
+			if obs.Excluded || (!obs.Downgraded && obs.Kind != root.SourceKind) {
 				root.Count++
 				root.InjectCount++
 				root.LastSeen = now
@@ -809,17 +816,18 @@ func (c *DedupCache) ObserveSignal(key EventKey, obs Observation) DedupResult {
 		if obs.Repeatable {
 			return c.repeat(entry, now, obs.LastTS, class, lapsed)
 		}
-		if !obs.Downgraded && obs.Kind != entry.SourceKind {
-			// Another source's lower-class angle on the same key —
-			// capacity.pending (warning) on a FailedScheduling
-			// incident, objectstate.restart_burst (warning) on a
-			// CrashLoopBackOff one. It is evidence the incident is
-			// still going, never a reason to unbind it: letting it
-			// fall to case 3 would replace the bound entry with an
-			// unbound one, and the next session-class occurrence would
-			// open a second session through the #84 retry. Absorbed.
-			// Only a §9.4 downgrade, or the opener's own kind
-			// re-classed, takes the legacy lapse below.
+		if obs.Excluded || (!obs.Downgraded && obs.Kind != entry.SourceKind) {
+			// Either an operator --alert-excludes rule (#836) matched an
+			// already-open incident, or another source's lower-class
+			// angle landed on the same key (e.g. capacity.pending on a
+			// FailedScheduling incident, objectstate.restart_burst on a
+			// CrashLoopBackOff one). Falling to case 3 would replace the
+			// bound entry with an unbound one — orphaning the open
+			// session so RecoveryTracker could no longer resolve it (and
+			// letting a later session-class occurrence open a duplicate
+			// session through the #84 retry). Keep it absorbed until
+			// MarkResolved; only a §9.4 downgrade, or an unexcluded
+			// re-classing of the opener's own kind, takes case 3 below.
 			entry.Count++
 			entry.LastSeen = now
 			entry.EventLastTS = obs.LastTS

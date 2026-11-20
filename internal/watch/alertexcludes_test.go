@@ -17,6 +17,7 @@ package watch
 import (
 	"bytes"
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -417,6 +418,9 @@ excludes:
 	if !strings.Contains(buf.String(), "info-drop ") {
 		t.Errorf("expected info-drop log line when --store is unset, got:\n%s", buf.String())
 	}
+	if !strings.Contains(buf.String(), `--alert-excludes kind="Pod" namespace="checkout" reason="CrashLoopBackOff"`) {
+		t.Errorf("expected info-drop log line to name the matched exclude rule, got:\n%s", buf.String())
+	}
 }
 
 func TestAlertExcludesDispatch_OutranksEscalatedTriageRecord(t *testing.T) {
@@ -586,7 +590,7 @@ excludes:
 	<-done
 }
 
-func TestAlertExcludesHotReload_OpenIncidentCase4ToCase3(t *testing.T) {
+func TestAlertExcludesHotReload_OpenIncidentAbsorbedUntilResolved(t *testing.T) {
 	t.Parallel()
 	base, injects := newRoutingFakeDaemon(t)
 	d, s := triageDispatcher(t, base)
@@ -597,7 +601,8 @@ func TestAlertExcludesHotReload_OpenIncidentCase4ToCase3(t *testing.T) {
 		t.Fatalf("NewDedupCache: %v", err)
 	}
 	dedup.SetClock(func() time.Time { return now })
-	dedup.SetOpenCheck(func(engine.EventKey) bool { return true })
+	open := true
+	dedup.SetOpenCheck(func(engine.EventKey) bool { return open })
 	d.dedup = dedup
 
 	path := writeAlertExcludesTemp(t, "excludes: []\n")
@@ -632,8 +637,8 @@ excludes:
 		t.Fatalf("Reload: %v", err)
 	}
 
-	// Step 3: Sighting inside the active dedup window takes Case 4 (deduped,
-	// no new session, no repeat reminder, existing session binding intact).
+	// Step 3: Sighting inside the active dedup window is absorbed (no new
+	// session, no reminder, existing session binding intact).
 	now = now.Add(2 * time.Minute)
 	sig2 := sig
 	sig2.Count = 4
@@ -641,71 +646,160 @@ excludes:
 	d.DispatchSignal(context.Background(), sig2)
 
 	if len(*injects) != 1 {
-		t.Fatalf("Case 4 in-window sighting injected: got %d injects, want 1", len(*injects))
+		t.Fatalf("in-window excluded sighting injected: got %d injects, want 1", len(*injects))
 	}
 	if got := testutil.ToFloat64(d.metrics.alertExcluded); got != 1 {
-		t.Errorf("Case 4 alert_excluded_total = %v, want 1", got)
+		t.Errorf("in-window alert_excluded_total = %v, want 1", got)
 	}
 	if gotSid, ok := d.dedup.LookupSession(key); !ok || gotSid != sid {
-		t.Errorf("Case 4 LookupSession = (%q, %v), want (%q, true)", gotSid, ok, sid)
+		t.Errorf("in-window LookupSession = (%q, %v), want (%q, true)", gotSid, ok, sid)
 	}
 
-	// Verify RecoveryTracker can still resolve an open session while bound
-	// (using a second pod opened, hot-reloaded, and resolved before lapse).
-	sigRes := crashLoopSignal()
-	sigRes.Key.UID = "uid-resolve-before-lapse"
-	sigRes.Name = "other-svc-7b9d-res1"
-	sigRes.ControllerRef = "ReplicaSet/other-svc-7b9d"
-	sigRes.Count = 3
-	sigRes.FirstSeen = now
-	sigRes.LastSeen = now
-	// Temporarily open without exclude, then re-enable exclude.
-	if err := os.WriteFile(path, []byte("excludes: []\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_ = d.excludes.Reload(false)
-	d.DispatchSignal(context.Background(), sigRes)
-	if len(*injects) != 2 {
-		t.Fatalf("second pod open injects = %d, want 2", len(*injects))
-	}
-	if err := os.WriteFile(path, []byte("excludes:\n  - kind: Pod\n    namespace: checkout\n    reason: CrashLoopBackOff\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_ = d.excludes.Reload(false)
-	// Dispatch recovery signal for sigRes — DispatchSignal handles KindResolved
-	// before classifySignal, so the exclude rule never suppresses resolution.
-	resolvedSig := engine.Signal{
-		Kind:        engine.KindResolved,
-		TriageEvent: sigRes.TriageEvent,
-		Recovery: &engine.Recovery{
-			Resolution:        engine.ResolutionRecovered,
-			ResolvedAt:        now.Add(1 * time.Minute),
-			ClearedAfter:      1 * time.Minute,
-			ObservedStableFor: 1 * time.Minute,
-		},
-	}
-	d.DispatchSignal(context.Background(), resolvedSig)
-	if len(*injects) != 3 {
-		t.Fatalf("resolved inject for open session = %d, want 3", len(*injects))
+	// Step 4: Excluded sibling source kind (objectstate.restart_burst with
+	// canonical CrashLoopBackOff) must NOT emit a CrossSourceJoin followup
+	// into the open session.
+	now = now.Add(30 * time.Second)
+	sibling := sig
+	sibling.Kind = "objectstate.restart_burst"
+	sibling.Key.Reason = "CrashLoopBackOff"
+	sibling.LastSeen = now
+	d.DispatchSignal(context.Background(), sibling)
+	if len(*injects) != 1 {
+		t.Fatalf("excluded sibling kind emitted cross-source join followup: got %d injects, want 1", len(*injects))
 	}
 
-	// Step 4: Advance past the 5m dedup window for the first pod: Case 3
-	// replaces the entry with an unbound info entry routed to RouteStore,
-	// stopping further reminders without opening a new session.
-	now = now.Add(6 * time.Minute)
+	// Step 5: Advance PAST the 5m dedup window while the incident is still
+	// open: sighting stays an absorbed duplicate so reminders stop AND the
+	// bound SessionID stays intact for RecoveryTracker.
+	now = now.Add(10 * time.Minute)
 	sig3 := sig
 	sig3.Count = 5
 	sig3.LastSeen = now
 	d.DispatchSignal(context.Background(), sig3)
 
-	if len(*injects) != 3 {
-		t.Fatalf("Case 3 post-lapse excluded sighting injected: got %d injects, want 3", len(*injects))
+	if len(*injects) != 1 {
+		t.Fatalf("post-lapse excluded sighting injected: got %d injects, want 1", len(*injects))
 	}
-	if _, ok := d.dedup.LookupSession(key); ok {
-		t.Error("Case 3 post-lapse entry should be unbound (info), still had bound session")
+	if gotSid, ok := d.dedup.LookupSession(key); !ok || gotSid != sid {
+		t.Fatalf("post-lapse LookupSession = (%q, %v), want (%q, true) so RecoveryTracker can still resolve", gotSid, ok, sid)
+	}
+
+	// Step 6: RecoveryTracker emits KindResolved for the SAME key AFTER the
+	// dedup window lapsed — must deliver to the bound session with zero
+	// unknown_session drops.
+	now = now.Add(1 * time.Minute)
+	resolvedSig := engine.Signal{
+		Kind:        engine.KindResolved,
+		TriageEvent: sig.TriageEvent,
+		Recovery: &engine.Recovery{
+			Resolution:        engine.ResolutionRecovered,
+			ResolvedAt:        now,
+			ClearedAfter:      10 * time.Minute,
+			ObservedStableFor: 1 * time.Minute,
+		},
+	}
+	d.DispatchSignal(context.Background(), resolvedSig)
+	open = false
+
+	if len(*injects) != 2 {
+		t.Fatalf("post-lapse resolved inject count = %d, want 2", len(*injects))
+	}
+	if got := testutil.ToFloat64(d.metrics.recoveryDrops.WithLabelValues("unknown_session")); got != 0 {
+		t.Errorf("recovery_drops_total{cause=unknown_session} = %v, want 0", got)
+	}
+
+	// Step 7: Once resolved, a fresh recurrence after the dedup window routes
+	// cleanly to RouteStore (info-stored in --store) without opening a session.
+	now = now.Add(6 * time.Minute)
+	sig4 := sig
+	sig4.Count = 6
+	sig4.LastSeen = now
+	d.DispatchSignal(context.Background(), sig4)
+
+	if len(*injects) != 2 {
+		t.Fatalf("post-resolution excluded recurrence injected: got %d injects, want 2", len(*injects))
 	}
 	byRoute := occurrencesByRoute(t, s)
 	if len(byRoute[store.RouteInfoStored]) != 1 {
-		t.Errorf("routes = %v, want 1 info-stored row from Case 3 lapse", routes(byRoute))
+		t.Errorf("routes = %v, want 1 info-stored row after resolution", routes(byRoute))
+	}
+}
+
+func TestAlertExcludesFlagUsagePlaceholder(t *testing.T) {
+	t.Parallel()
+	fs, _ := newFlagSet()
+	fl := fs.Lookup("alert-excludes")
+	if fl == nil {
+		t.Fatal("alert-excludes flag not registered")
+	}
+	name, _ := flag.UnquoteUsage(fl)
+	if name != "file" {
+		t.Errorf("flag usage placeholder = %q, want %q", name, "file")
+	}
+}
+
+func TestAlertExcludesRunnerRestart_KeepsLastGoodHotReload(t *testing.T) {
+	t.Parallel()
+	path := writeAlertExcludesTemp(t, `
+excludes:
+  - kind: Pod
+    namespace: v1-ns
+`)
+	f, err := parseFlags([]string{"--dry-run", "--alert-excludes=" + path})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if err := f.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
+	r := &runner{
+		f:       f,
+		metrics: newMetrics(),
+	}
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	disp1 := &dispatcher{mode: "per-incident", metrics: r.metrics}
+	dedup1, _ := engine.NewDedupCache(5*time.Minute, "")
+	if wait := r.wireDispatcherRoutingAndLoops(ctx1, f, nil, disp1, dedup1, nil); wait != nil {
+		cancel1()
+		wait()
+	} else {
+		cancel1()
+	}
+
+	// Hot-reload to v2 rules while running.
+	if err := os.WriteFile(path, []byte("excludes:\n  - kind: Pod\n    namespace: v2-ns\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.excludes.Reload(false); err != nil {
+		t.Fatalf("Reload v2: %v", err)
+	}
+
+	// Now corrupt the file before a simulated supervisor restart.
+	if err := os.WriteFile(path, []byte("excludes:\n  - kind: Pod\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	disp2 := &dispatcher{mode: "per-incident", metrics: r.metrics}
+	dedup2, _ := engine.NewDedupCache(5*time.Minute, "")
+	if wait := r.wireDispatcherRoutingAndLoops(ctx2, f, nil, disp2, dedup2, nil); wait != nil {
+		cancel2()
+		wait()
+	} else {
+		cancel2()
+	}
+
+	// Must keep v2 (last valid hot-reload), NOT fall back to startup v1!
+	v2Sig := engine.Signal{TriageEvent: engine.TriageEvent{KindOfObject: "Pod", Namespace: "v2-ns"}}
+	v1Sig := engine.Signal{TriageEvent: engine.TriageEvent{KindOfObject: "Pod", Namespace: "v1-ns"}}
+	if _, ok := disp2.excludes.Match(v2Sig); !ok {
+		t.Error("after restart with broken file, last-good hot-reloaded v2 rule was lost")
+	}
+	if _, ok := disp2.excludes.Match(v1Sig); ok {
+		t.Error("after restart with broken file, stale startup v1 rule resurrected")
+	}
+	if got := testutil.ToFloat64(r.metrics.alertExcludeRefused); got != 1 {
+		t.Errorf("alert_exclude_refused after restart with broken file = %v, want 1", got)
 	}
 }
