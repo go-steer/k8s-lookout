@@ -23,8 +23,6 @@
 . "$(dirname "$0")/../../lib.sh"
 require_examples_context
 
-stub_mark alert-excludes
-
 echo "▸ redeploying sentinel with ALERT_EXCLUDES + --store"
 ALERT_EXCLUDES="$(cat <<YAML
 excludes:
@@ -32,7 +30,9 @@ excludes:
     namespace: ${DEMO_NS}
     reason: CrashLoopBackOff
 YAML
-)" "$(examples_root)/sentinel/up"
+)" sentinel_resync
+
+stub_mark alert-excludes
 
 echo "▸ breaking worker: command → exit(1) after 2s"
 kubectl -n "$DEMO_NS" patch deployment worker --type=json -p '[

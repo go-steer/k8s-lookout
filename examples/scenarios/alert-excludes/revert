@@ -21,5 +21,5 @@ kubectl apply -f "$(examples_root)/workloads/30-worker.yaml"
 kubectl -n "$DEMO_NS" rollout status deploy/worker --timeout=120s
 
 echo "▸ restoring sentinel without ALERT_EXCLUDES"
-ALERT_EXCLUDES="" "$(examples_root)/sentinel/up"
+ALERT_EXCLUDES="" sentinel_resync
 kubectl -n "$SENTINEL_NS" delete configmap lookout-alert-excludes --ignore-not-found

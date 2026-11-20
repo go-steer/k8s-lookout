@@ -84,25 +84,6 @@ gateway_cert_stack_down() {
     namespace/envoy-gateway-system namespace/cert-manager >/dev/null 2>&1 || true
 }
 
-# sentinel_resync — re-run examples/sentinel/up with the image the
-# sentinel is ALREADY running, then restart it.
-#
-# Both sources this scenario needs read the cluster's API surface once,
-# at startup: sentinel/up only names `gateway` in --sources when the
-# Gateway API CRDs are served, and the expiry source only includes
-# cert-manager Certificates when it discovers their CRD as it starts.
-# So installing the stack under a running sentinel is not enough.
-#
-# Re-running sentinel/up bare would also swap the image back to its
-# GHCR default, which in CI is the wrong binary (kind/up --build).
-sentinel_resync() {
-  local image
-  image="$(kubectl -n "$SENTINEL_NS" get deployment lookout-watch \
-    -o jsonpath='{.spec.template.spec.containers[0].image}')"
-  echo "▸ re-running sentinel/up with the running image ($image)"
-  LOOKOUT_IMAGE="$image" "$(examples_root)/sentinel/up" >/dev/null
-  # sentinel/up only rolls the pod when the args changed; force it, so
-  # the expiry source's cert-manager discovery runs again either way.
-  kubectl -n "$SENTINEL_NS" rollout restart deployment/lookout-watch >/dev/null
-  kubectl -n "$SENTINEL_NS" rollout status deployment/lookout-watch --timeout=180s >/dev/null
-}
+# sentinel_resync lives in examples/lib.sh so every scenario that restarts
+# the sentinel (gateway-cert, alert-excludes, crash-blip) preserves the
+# running image instead of falling back to sentinel/up's GHCR default.
