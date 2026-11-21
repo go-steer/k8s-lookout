@@ -904,6 +904,67 @@ modes become per-class:
 | `warning` | shared watchboard session, batched (rolling digest inject) |
 | `info` | stored only (§9.1); surfaced by read-path queries and digests |
 
+#### Alert-exclude rules (`--alert-excludes`, #836)
+
+Operators who want to quiet a noisy namespace or workload (for example a staging
+canary or load generator) without blinding the watch via `--exclude-namespace`
+or demoting an entire signal kind cluster-wide via `--severity kind=level` can
+pass `--alert-excludes <file>` (`(experimental)`). Following `pkg/exempt`'s
+principle that *exempt must not mean absent*, matching signals are never dropped
+from the informer or filtered out before dedup: they downgrade to
+`SeverityInfo` (`RouteStore`), persisting in `--store` when configured (and
+counting/logging via `info-drop` when `--store` is unset) without opening a
+session or watchboard entry.
+
+- **Strict YAML schema and alignments/amendments to `#234` (`pkg/exempt`):**
+  The file requires a top-level `excludes:` list (strict YAML unmarshaling
+  rejects unknown keys such as label selectors, missing wrappers, and
+  truncated files; `excludes: []` is valid). Every rule requires an
+  involved-object `kind` (case-insensitive, distinct from `--severity`'s signal
+  kind) **plus** at least one narrowing matcher (`namespace`, `reason`, or
+  `name`), rejecting `kind`-only rules alongside bare `*` or mid-string `*`.
+  `reason` matches both wire `Event.Reason` and message-aware canonical reasons
+  case-insensitively, refusing autoscaler verdict reasons (`TriggeredScaleUp`,
+  `NotTriggerScaleUp`, `FailedScaleUp`) at load time so rules cannot blind the
+  `FailedScheduling` verdict memo. `name` supports exact match or a trailing
+  `*` prefix (`loadgen-*`). Optional `cluster`, `project`, and `location`
+  (matching `Zone` or `Region`) scope rules in multi-cluster mode. Rules match
+  involved-object `kind` and canonical `reason` across **all** signal kinds —
+  so excluding `{kind: Pod, namespace: X, reason: FailedScheduling}` also
+  demotes `capacity.pending-aged` (whose canonical reason is
+  `FailedScheduling`), the safety-net pager for `#835`'s verdict gate. An
+  optional `owner`/`ControllerRef` matcher is intentionally omitted from this
+  first `(experimental)` release (trailing-`*` pod prefixes cover
+  Deployment/ReplicaSet pods cleanly, and `owner` stays additive if needed
+  later). Three explicit amendments to `#234` reflect watch-path operations:
+  ConfigMap-friendly hot-reload without restart (1 m ticker + `SIGHUP`), no
+  mandatory expiry or justification (replaced by per-rule startup/reload audit
+  log lines and Prometheus gauges), and trailing-`*` pod-name prefixes.
+- **Startup validation (exit 2) and precedence:** Missing, unreadable, or
+  malformed files at startup — and combining `--alert-excludes` with
+  `--mode=shared` (which ignores severity routing by frozen contract) — fail
+  with exit 2 (`emit.UsageErrorf`). Evaluation runs in `classifySignal` **after**
+  `d.routing.Classify` and **after** `d.triage.Apply`, so an operator-declared
+  exclude file always outranks an agent-written `status=escalated` or
+  severity-upgrade triage record and suppresses `triage.regressed` followups.
+- **Hot-reload and open-incident semantics:** On a malformed or unreadable
+  reload, the sentinel keeps the previously loaded valid rules in force (across
+  multi-cluster runner restarts as well), logs loudly, and sets
+  `lookout_watch_alert_exclude_refused = 1` (resetting to `0` on the next valid
+  reload). Dedicated metrics export `lookout_watch_alert_excluded_total`
+  (separate from `lookout_events_filtered_total`),
+  `lookout_watch_alert_exclude_rules`, and
+  `lookout_watch_alert_exclude_refused`, and `info-store`/`info-drop` logs
+  name the matched rule. When a hot-reloaded rule matches an already-open
+  session-class incident (`pkg/engine/dedup.go` Case 2), sightings stay
+  absorbed duplicates (recording `RouteSuppressed` against the bound session,
+  stopping further reminders and suppressing `CrossSourceJoin` followups)
+  instead of lapsing to an unbound Case 3 entry — refining `#836`'s original
+  Case-3 wording so the bound `SessionID` stays intact and `RecoveryTracker`
+  still delivers `kind=resolved` to the open session even after the dedup
+  window has elapsed. Once the incident resolves (or when no session is open),
+  excluded sightings route to `RouteStore` (`RouteInfoStored` / `info-drop`).
+
 #### Same-class owner folding (#583 / #600 / #601)
 
 The dedup key is `(uid, reason)`, so two pods are two

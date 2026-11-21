@@ -146,6 +146,14 @@ spec:
             #   - "--failedscheduling-min-span=0"
             #   - "--scaleup-hold=0"
             #   - "--autopilot-scale-to-zero-hold=false"
+            # Alert-exclude rules (#836, experimental): mount a ConfigMap
+            # holding `excludes:` rules as a directory (do NOT use subPath —
+            # Kubernetes does not propagate ConfigMap updates to subPath
+            # mounts, which breaks hot-reload) and point --alert-excludes at
+            # it. Matching signals downgrade to severity=info (persisted in
+            # --store above) without dropping the namespace from the watch;
+            # hot-reloaded every 1m and on SIGHUP. Incompatible with --mode=shared.
+            #   - "--alert-excludes=/etc/lookout/alert-excludes.yaml"
           volumeMounts:
             - name: lookout-data
               mountPath: /var/lib/lookout

@@ -671,6 +671,7 @@ type runner struct {
 	token       string               // resolved --token-env daemon bearer (sources reuse it)
 	metricsReg  *prometheus.Registry // process-global scrape registry
 	metrics     *metrics             // this cluster's bundle, built once (newRunner), reused across restarts
+	excludes    *alertExcludeStore   // per-runner alert-excludes store, reused across supervisor restarts so last-good hot-reloaded rules survive
 	ready       *readiness           // process-global /readyz tracker; nil in tests that drive run directly
 
 	// meterProvider is this cluster's OpenTelemetry MeterProvider
@@ -926,6 +927,20 @@ func (r *runner) wireDispatcherRoutingAndLoops(
 ) func() {
 	m := r.metrics
 	disp.routing = engine.NewRoutingPolicy(f.severityOverrides)
+	if f.alertExcludes != "" {
+		if r.excludes == nil {
+			r.excludes = newAlertExcludeStore(f.alertExcludes, f.alertExcludeRules, f.alertExcludeRaw, m, nil)
+		} else {
+			// Supervisor restart: re-read from disk while preserving the
+			// last valid hot-reloaded rules in force if the file is now broken.
+			_ = r.excludes.Reload(false)
+		}
+		disp.excludes = r.excludes
+		startAlertExcludeReloader(ctx, r.excludes)
+		if occStore == nil {
+			log.Printf("alert-excludes: --store is unset — excluded signals downgrade to info (counted and logged via info-drop) rather than persisting to SQLite; set --store to retain them")
+		}
+	}
 	if f.mode == "per-incident" {
 		board := newWatchboard(watchboardConfig{
 			injector:       maskedSink,

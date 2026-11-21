@@ -89,6 +89,9 @@ type metrics struct {
 	eventsDedupSuppress     *prometheus.CounterVec
 	eventsFiltered          *prometheus.CounterVec
 	scaleUpVerdictsRejected prometheus.Counter
+	alertExcluded           prometheus.Counter
+	alertExcludeRules       prometheus.Gauge
+	alertExcludeRefused     prometheus.Gauge
 	injectErrors            *prometheus.CounterVec
 	injectShrinks           *prometheus.CounterVec
 	sessionCreates          *prometheus.CounterVec
@@ -196,6 +199,18 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		scaleUpVerdictsRejected: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "lookout_watch_scaleup_verdicts_rejected_total",
 			Help: "Total TriggeredScaleUp, NotTriggerScaleUp, or FailedScaleUp Pod events ignored by the capacity verdict memo because their reporter (source.component or reportingController) was not cluster-autoscaler or because involvedObject.namespace did not match metadata.namespace.",
+		}),
+		alertExcluded: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "lookout_watch_alert_excluded_total",
+			Help: "Total non-filtered signals matched by an --alert-excludes rule and downgraded to severity=info (stored when --store is set, counted and logged via info-drop otherwise) without opening a session.",
+		}),
+		alertExcludeRules: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "lookout_watch_alert_exclude_rules",
+			Help: "Number of active alert-exclude rules currently loaded from --alert-excludes.",
+		}),
+		alertExcludeRefused: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "lookout_watch_alert_exclude_refused",
+			Help: "1 when the most recent --alert-excludes hot-reload failed (previous valid rules stay in force); 0 when the last load or reload succeeded.",
 		}),
 		injectErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lookout_inject_errors_total",
@@ -394,6 +409,9 @@ func buildMetrics(reg prometheus.Registerer) *metrics {
 		m.eventsDedupSuppress,
 		m.eventsFiltered,
 		m.scaleUpVerdictsRejected,
+		m.alertExcluded,
+		m.alertExcludeRules,
+		m.alertExcludeRefused,
 		m.injectErrors,
 		m.injectShrinks,
 		m.sessionCreates,

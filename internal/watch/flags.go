@@ -148,6 +148,7 @@ type flags struct {
 	stormMineMin             int
 	stormClusterFallback     bool
 	severity                 severityFlag
+	alertExcludes            string
 	watchboardBatch          int
 	watchboardFlush          time.Duration
 	watchboardRotate         int
@@ -167,6 +168,10 @@ type flags struct {
 	// severityOverrides is the parsed --severity map, populated by
 	// validate().
 	severityOverrides map[string]engine.Severity
+	// alertExcludeRules and alertExcludeRaw hold the validated initial
+	// --alert-excludes file parsed by validate().
+	alertExcludeRules []AlertExcludeRule
+	alertExcludeRaw   []byte
 	// sourcesAutoResolved records that --sources=auto expanded this
 	// list: the auto summary already reported per-source degradation
 	// lines, so realMain's Probe pass skips re-reporting them (#145
@@ -416,6 +421,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// --mode=shared ALL severities keep routing to --target-session
 	// (frozen contract) and the watchboard machinery is disabled.
 	fs.Var(&f.severity, "severity", "Per-kind severity override(s): kind=level[,kind=level...] with level one of critical|warning|info. Repeatable and additive; overrides the source-stamped §7.7 default for that kind. Each kind may appear at most once.")
+	fs.StringVar(&f.alertExcludes, "alert-excludes", "", "Path to a YAML `file` of alert-exclude rules (experimental): top-level excludes: list where each rule specifies involved-object kind (case-insensitive) plus at least one narrowing matcher (namespace, reason, or name with optional trailing * prefix), and optional multi-cluster cluster/project/location. Matches across all signal kinds (so excluding Pod FailedScheduling also demotes capacity.pending-aged). Matching signals downgrade to severity=info (persisted when --store is set; counted and logged via info-drop when --store is unset) after --severity and triage-status overrides. Hot-reloaded every 1m and on SIGHUP without restarting; missing, unreadable, or malformed files at startup, or combining with --mode=shared, exit 2.")
 	fs.IntVar(&f.watchboardBatch, "watchboard-batch", 5, "Buffered warning-class signals that trigger a watchboard digest flush (per-incident mode; §7.7). Must be >= 1.")
 	fs.DurationVar(&f.watchboardFlush, "watchboard-flush", 60*time.Second, "Maximum age of a buffered warning before the watchboard digest flushes regardless of batch size. Must be > 0.")
 	fs.IntVar(&f.watchboardRotate, "watchboard-rotate", 200, "Digest injects per watchboard session before size-based rotation (§15 Q2) opens a fresh session. Must be >= 1.")
@@ -902,6 +908,20 @@ func (f *flags) validate() error {
 		return fmt.Errorf("--severity: %w", err)
 	}
 	f.severityOverrides = overrides
+	// Alert-exclude rules (#836): validated at startup (exit 2) before
+	// the mode/dry-run early return so missing/malformed files and
+	// --mode=shared fail loudly in every mode.
+	if f.alertExcludes != "" {
+		if f.mode == "shared" {
+			return emit.UsageErrorf("--alert-excludes is not valid with --mode=shared: shared mode ignores severity routing and forwards every signal to --target-session")
+		}
+		rules, raw, aerr := loadAlertExcludesFile(f.alertExcludes)
+		if aerr != nil {
+			return emit.UsageErrorf("--alert-excludes: %v", aerr)
+		}
+		f.alertExcludeRules = rules
+		f.alertExcludeRaw = raw
+	}
 	if f.watchboardBatch < 1 {
 		return errors.New("--watchboard-batch must be >= 1")
 	}
