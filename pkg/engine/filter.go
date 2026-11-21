@@ -87,6 +87,9 @@ type FilterConfig struct {
 	// rolling quota window does not reach and a real registry outage
 	// does.
 	imagePullTransientMinCount int
+	// failedScheduling configures the FailedScheduling verdict + count/span
+	// gate (#835). Zero-value leaves the gate disabled.
+	failedScheduling FailedSchedulingConfig
 }
 
 // NewFilterConfig builds a FilterConfig from CLI-shaped inputs.
@@ -133,9 +136,11 @@ func stringSet(xs []string) map[string]struct{} {
 }
 
 // Filter decides whether a signal should proceed to dedup + inject.
-// Pure function — same input, same output; no I/O.
+// Safe for concurrent use; the FailedScheduling decision log memo holds its
+// own mutex.
 type Filter struct {
-	cfg FilterConfig
+	cfg   FilterConfig
+	fsLog fsLogMemo
 }
 
 func NewFilter(cfg FilterConfig) *Filter {
@@ -147,12 +152,18 @@ func NewFilter(cfg FilterConfig) *Filter {
 // just that something did. A closed, low-cardinality set: safe as a
 // Prometheus label value.
 const (
-	GateReasonNotAllowed    = "reason_not_allowed"
-	GateNamespaceExcluded   = "namespace_excluded"
-	GateNamespaceNotAllowed = "namespace_not_allowed"
-	GateUnhealthyDebounce   = "unhealthy_debounce"
-	GateCrashLoopDebounce   = "crashloop_debounce"
-	GatePullTransient       = "imagepull_transient_debounce"
+	GateReasonNotAllowed           = "reason_not_allowed"
+	GateNamespaceExcluded          = "namespace_excluded"
+	GateNamespaceNotAllowed        = "namespace_not_allowed"
+	GateUnhealthyDebounce          = "unhealthy_debounce"
+	GateCrashLoopDebounce          = "crashloop_debounce"
+	GatePullTransient              = "imagepull_transient_debounce"
+	GateFailedSchedulingNotPending = "failedscheduling_not_pending"
+	GateFailedSchedulingStale      = "failedscheduling_stale"
+	GateScaleUpHold                = "scaleup_hold"
+	GateAutopilotScaleToZero       = "autopilot_scale_to_zero"
+	GateFailedSchedulingMinCount   = "failedscheduling_min_count"
+	GateFailedSchedulingMinSpan    = "failedscheduling_min_span"
 )
 
 // Accept returns true if the signal passes every filter rule. The
@@ -218,16 +229,20 @@ func (f *Filter) Decide(sig Signal) (bool, string) {
 	if eventKind {
 		switch CanonicalReasonForEvent(sig.Key.Reason, sig.Message) {
 		case "Unhealthy":
-			if sig.Count > 0 && sig.Count < f.cfg.unhealthyMinCount {
+			if belowMinCount(sig.Count, f.cfg.unhealthyMinCount) {
 				return false, GateUnhealthyDebounce
 			}
 		case "CrashLoopBackOff":
-			if sig.Count > 0 && sig.Count < f.cfg.backoffMinCount {
+			if belowMinCount(sig.Count, f.cfg.backoffMinCount) {
 				return false, GateCrashLoopDebounce
 			}
 		case "ImagePullBackOff":
-			if sig.PullClass == PullClassRetryable && sig.Count > 0 && sig.Count < f.cfg.imagePullTransientMinCount {
+			if sig.PullClass == PullClassRetryable && belowMinCount(sig.Count, f.cfg.imagePullTransientMinCount) {
 				return false, GatePullTransient
+			}
+		case "FailedScheduling":
+			if f.cfg.failedScheduling.Active() {
+				return f.decideFailedScheduling(sig)
 			}
 		}
 	}

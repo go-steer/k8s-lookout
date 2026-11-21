@@ -59,10 +59,14 @@ Final ledger, asserted in CI forever: two injects (warning digest +
 critical incident), two sessions, zero re-fires of the same critical state
 — one diagnosed incident, not two alerts a human joins.
 
-The Kubernetes-visible half ran live: a pod stuck Unschedulable produced
-three observation angles — the reactive `FailedScheduling` Event, the CA's
-`NotTriggerScaleUp`, and the `--pending-age` sweep — all collapsing into
-one session via the dedup family:
+The Kubernetes-visible half ran live (pre-#835 ordering; with #835's
+`FailedScheduling` verdict gate active on series-only schedulers,
+`capacity.pending` / `capacity.pending-aged` opens first while unruled
+`FailedScheduling` is held until autoscaler decline or count/span): a pod
+stuck Unschedulable produced three observation angles — the reactive
+`FailedScheduling` Event, the CA's `NotTriggerScaleUp`, and the
+`--pending-age` sweep — all collapsing into one session via the dedup
+family:
 
 ```txt
 13:14:32  k8s-event              FailedScheduling  critical  injected    stub-sess-0007

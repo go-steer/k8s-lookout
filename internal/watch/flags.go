@@ -83,83 +83,87 @@ type flags struct {
 	// admittedNamespaces is the run-scoped subset of the --watch-scope
 	// namespaces whose grants passed admitNamespaces; nil until a run sets
 	// it. See scopeNamespaces.
-	admittedNamespaces    []string
-	sources               string
-	accessRecheck         time.Duration
-	rolloutObserve        time.Duration
-	saturationInterval    time.Duration
-	saturationWindow      time.Duration
-	saturationWarn        time.Duration
-	degradationWindow     time.Duration
-	degradationDrop       float64
-	expiryInterval        time.Duration
-	expiryWarn            time.Duration
-	expiryNamespaces      string
-	expiryACMEGrace       time.Duration
-	capacityPoll          time.Duration
-	pendingAge            time.Duration
-	gatewayGrace          time.Duration
-	topologyKeys          string
-	topologyDefaults      string
-	topologyPerDomain     bool
-	topologyMinDrift      float64
-	topologyMaxKeys       int
-	topologyCollapse      bool
-	topologyDomainNS      string
-	topologyDomainNotNS   string
-	topologyDwell         time.Duration
-	topologyCapacityRatio float64
-	topologyNodeGroupKeys string
-	topologyMaxNodeGroups int
-	topologyDomainKeys    string
-	topologyTierC         bool
-	topologyLearn         bool
-	topologyHalfLife      time.Duration
-	topologyBand          float64
-	computeClassInfer     bool
-	computeClassWindow    time.Duration
-	computeClassDwell     time.Duration
-	computeClassRank0     float64
-	computeClassLastRank  float64
-	computeClassTierC     bool
-	quotaPoll             time.Duration
-	quotaWindow           time.Duration
-	quotaWarn             float64
-	notificationsSub      string
-	tokenPoll             time.Duration
-	burnMultiple          float64
-	burnETA               time.Duration
-	tokenBudgetUSD        float64
-	tokenEndpoint         string
-	dedupWindow           time.Duration
-	dedupPersist          string
-	unhealthyMinCount     int
-	backoffMinCount       int
-	imagePullTransientMin int
-	recoveryStableFor     time.Duration
-	storm                 string
-	stormWindow           time.Duration
-	stormMin              int
-	stormMine             bool
-	stormMineMin          int
-	stormClusterFallback  bool
-	severity              severityFlag
-	watchboardBatch       int
-	watchboardFlush       time.Duration
-	watchboardRotate      int
-	enrich                string
-	enrichCap             int
-	injectMaxBytes        int
-	enrichLogLines        int
-	enrichTimeout         time.Duration
-	enrichLists           string
-	enrichListsPreflight  bool
-	store                 string
-	storeTTL              time.Duration
-	storeMaxMB            int
-	triageRegressFactor   int
-	distillInterval       time.Duration
-	graphSnapshotInterval time.Duration
+	admittedNamespaces       []string
+	sources                  string
+	accessRecheck            time.Duration
+	rolloutObserve           time.Duration
+	saturationInterval       time.Duration
+	saturationWindow         time.Duration
+	saturationWarn           time.Duration
+	degradationWindow        time.Duration
+	degradationDrop          float64
+	expiryInterval           time.Duration
+	expiryWarn               time.Duration
+	expiryNamespaces         string
+	expiryACMEGrace          time.Duration
+	capacityPoll             time.Duration
+	pendingAge               time.Duration
+	gatewayGrace             time.Duration
+	topologyKeys             string
+	topologyDefaults         string
+	topologyPerDomain        bool
+	topologyMinDrift         float64
+	topologyMaxKeys          int
+	topologyCollapse         bool
+	topologyDomainNS         string
+	topologyDomainNotNS      string
+	topologyDwell            time.Duration
+	topologyCapacityRatio    float64
+	topologyNodeGroupKeys    string
+	topologyMaxNodeGroups    int
+	topologyDomainKeys       string
+	topologyTierC            bool
+	topologyLearn            bool
+	topologyHalfLife         time.Duration
+	topologyBand             float64
+	computeClassInfer        bool
+	computeClassWindow       time.Duration
+	computeClassDwell        time.Duration
+	computeClassRank0        float64
+	computeClassLastRank     float64
+	computeClassTierC        bool
+	quotaPoll                time.Duration
+	quotaWindow              time.Duration
+	quotaWarn                float64
+	notificationsSub         string
+	tokenPoll                time.Duration
+	burnMultiple             float64
+	burnETA                  time.Duration
+	tokenBudgetUSD           float64
+	tokenEndpoint            string
+	dedupWindow              time.Duration
+	dedupPersist             string
+	unhealthyMinCount        int
+	backoffMinCount          int
+	imagePullTransientMin    int
+	failedSchedulingMinCount int
+	failedSchedulingMinSpan  time.Duration
+	scaleUpHold              time.Duration
+	autopilotScaleToZeroHold bool
+	recoveryStableFor        time.Duration
+	storm                    string
+	stormWindow              time.Duration
+	stormMin                 int
+	stormMine                bool
+	stormMineMin             int
+	stormClusterFallback     bool
+	severity                 severityFlag
+	watchboardBatch          int
+	watchboardFlush          time.Duration
+	watchboardRotate         int
+	enrich                   string
+	enrichCap                int
+	injectMaxBytes           int
+	enrichLogLines           int
+	enrichTimeout            time.Duration
+	enrichLists              string
+	enrichListsPreflight     bool
+	store                    string
+	storeTTL                 time.Duration
+	storeMaxMB               int
+	triageRegressFactor      int
+	distillInterval          time.Duration
+	graphSnapshotInterval    time.Duration
 	// severityOverrides is the parsed --severity map, populated by
 	// validate().
 	severityOverrides map[string]engine.Severity
@@ -377,6 +381,10 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.IntVar(&f.unhealthyMinCount, "unhealthy-min-count", 3, "Require this many consecutive Unhealthy events before firing.")
 	fs.IntVar(&f.backoffMinCount, "backoff-min-count", 3, "Require the crash-loop family (canonical CrashLoopBackOff — kubelet's repeating BackOff cycle) to reach this Event.Count before firing, so a transient startup blip that self-heals does not open a noise session. Image-pull backoff is gated separately by --imagepull-transient-min-count. 1 fires on the first event.")
 	fs.IntVar(&f.imagePullTransientMin, "imagepull-transient-min-count", 3, "Require an image-pull failure whose cause is RETRYABLE (registry 429/quota, 5xx, timeout, connection reset) to reach this Event.Count before firing, so a rate limit kubelet clears on its own does not open a noise session. Terminal causes (bad tag, denied, no space) and unrecognized ones still fire on the first event. 1 fires on the first event.")
+	fs.IntVar(&f.failedSchedulingMinCount, "failedscheduling-min-count", engine.DefaultFailedSchedulingMinCount, "Require an unruled FailedScheduling event to reach this Event.Count before passing the verdict gate (experimental). Active only when the capacity source is enabled; 1 disables the count backstop. Disable all four FailedScheduling knobs (--failedscheduling-min-count=1 --failedscheduling-min-span=0 --scaleup-hold=0 --autopilot-scale-to-zero-hold=false) to restore event-#1 pass-through.")
+	fs.DurationVar(&f.failedSchedulingMinSpan, "failedscheduling-min-span", engine.DefaultFailedSchedulingMinSpan, "Require an unruled FailedScheduling event past --failedscheduling-min-count to span at least this duration (LastSeen - FirstSeen) before firing (experimental). Active only when the capacity source is enabled; 0 disables the span backstop.")
+	fs.DurationVar(&f.scaleUpHold, "scaleup-hold", engine.DefaultScaleUpHold, "How long a cluster-autoscaler TriggeredScaleUp verdict holds FailedScheduling events for that pod, measured from the verdict timestamp to the event's LastSeen (experimental). Active only when the capacity source is enabled; NotTriggerScaleUp and FailedScaleUp release the hold immediately, and capacity.pending-aged bounds any forged-event mute at 15m. 0 disables the hold.")
+	fs.BoolVar(&f.autopilotScaleToZeroHold, "autopilot-scale-to-zero-hold", true, "Hold unruled FailedScheduling events whose exact message is 'no nodes available to schedule pods' when pkg/cloud.Provider reports a GKE Autopilot cluster (experimental). Active only when the capacity source is enabled; fails open (inactive) when no cloud provider is linked or ClusterConfig is unavailable.")
 
 	// Recovery injects (§7.4).
 	fs.DurationVar(&f.recoveryStableFor, "recovery-stable-for", 5*time.Minute, "How long a cleared symptom must stay clear before kind=resolved is injected into the incident's session; recurrence within this window after a resolve fires kind=resolved.reverted. 0 disables recovery tracking.")
@@ -944,6 +952,15 @@ func (f *flags) validate() error {
 	}
 	if f.graphSnapshotInterval <= 0 {
 		return errors.New("--graph-snapshot-interval must be > 0")
+	}
+	if f.failedSchedulingMinCount < 1 {
+		return errors.New("--failedscheduling-min-count must be >= 1 (1 disables the count backstop)")
+	}
+	if f.failedSchedulingMinSpan < 0 {
+		return errors.New("--failedscheduling-min-span must be >= 0 (0 disables the span backstop)")
+	}
+	if f.scaleUpHold < 0 {
+		return errors.New("--scaleup-hold must be >= 0 (0 disables the TriggeredScaleUp hold)")
 	}
 	switch f.mode {
 	case "per-incident":

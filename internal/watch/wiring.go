@@ -772,6 +772,11 @@ func (r *runner) run(ctx context.Context) error {
 	}
 	defer cleanupSources()
 	registry := bs.registry
+	var capSrc failedSchedulingSource
+	if bs.capacity != nil {
+		capSrc = bs.capacity
+	}
+	configureFailedSchedulingGate(ctx, f, capSrc, bs.provider, filter, m, log.Printf)
 
 	feed, err := r.wireGraphAndEnrichment(ctx, f, client, reviewer, factories, disp, dedup, occStore, bs)
 	if err != nil {
@@ -1031,6 +1036,7 @@ func (r *runner) buildRunnerSources(
 	if err != nil {
 		return nil, sharedFactories{}, cleanup, err
 	}
+	bs.provider = provider
 
 	factories := newSharedFactories(client, splitCSV(f.excludeNamespaces), f.scopeNamespaces())
 	switch {
@@ -1396,6 +1402,7 @@ var recoveryAccess = []sources.Requirement{
 // observers.
 type builtSources struct {
 	registry    *sources.Registry
+	provider    cloud.Provider
 	k8sevents   *k8sevents.Source
 	objState    *objectstate.Source
 	rollout     *rollout.Source
@@ -1569,6 +1576,7 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			cfg := capacity.DefaultConfig()
 			cfg.PollInterval = f.capacityPoll
 			cfg.PendingAge = f.pendingAge
+			cfg.VerdictTTL = max(f.dedupWindow, f.scaleUpHold+engine.FailedSchedulingStaleAfter)
 			bs.capacity = capacity.New(client, provider, cfg)
 			src = bs.capacity
 		case ingress.Name:
