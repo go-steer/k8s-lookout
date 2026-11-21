@@ -32,6 +32,9 @@
 #                   it at /etc/lookout/alert-excludes.yaml, passes
 #                   --alert-excludes, and enables --store=/var/lib/lookout/lookout.db
 #                   so excluded info-class signals persist instead of dropping.
+#   SETTLE          optional duration for --settle (e.g. 2m for crash-blip);
+#                   unset omits --settle so the sentinel runs its 0 (off)
+#                   default and smoke-tier crashloop stays unchanged.
 
 . "$(dirname "$0")/../lib.sh"
 require_examples_context
@@ -144,6 +147,10 @@ args=(
 # run every other scenario.
 if kubectl get crd certificates.cert-manager.io >/dev/null 2>&1; then
   args+=("--expiry-acme-grace=60s")
+fi
+if [[ -n "${SETTLE:-}" ]]; then
+  echo "▸ settle gate enabled: --settle=$SETTLE"
+  args+=("--settle=$SETTLE")
 fi
 patch_ops=(
   "{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$image\"}"

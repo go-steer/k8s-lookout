@@ -140,6 +140,7 @@ type flags struct {
 	failedSchedulingMinSpan  time.Duration
 	scaleUpHold              time.Duration
 	autopilotScaleToZeroHold bool
+	settle                   time.Duration
 	recoveryStableFor        time.Duration
 	storm                    string
 	stormWindow              time.Duration
@@ -390,6 +391,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.DurationVar(&f.failedSchedulingMinSpan, "failedscheduling-min-span", engine.DefaultFailedSchedulingMinSpan, "Require an unruled FailedScheduling event past --failedscheduling-min-count to span at least this duration (LastSeen - FirstSeen) before firing (experimental). Active only when the capacity source is enabled; 0 disables the span backstop.")
 	fs.DurationVar(&f.scaleUpHold, "scaleup-hold", engine.DefaultScaleUpHold, "How long a cluster-autoscaler TriggeredScaleUp verdict holds FailedScheduling events for that pod, measured from the verdict timestamp to the event's LastSeen (experimental). Active only when the capacity source is enabled; NotTriggerScaleUp and FailedScaleUp release the hold immediately, and capacity.pending-aged bounds any forged-event mute at 15m. 0 disables the hold.")
 	fs.BoolVar(&f.autopilotScaleToZeroHold, "autopilot-scale-to-zero-hold", true, "Hold unruled FailedScheduling events whose exact message is 'no nodes available to schedule pods' when pkg/cloud.Provider reports a GKE Autopilot cluster (experimental). Active only when the capacity source is enabled; fails open (inactive) when no cloud provider is linked or ClusterConfig is unavailable.")
+	fs.DurationVar(&f.settle, "settle", 0, "Minimum wall-clock span (LastSeen - FirstSeen) a settle-family k8s-event failure (canonical CrashLoopBackOff, or allowlisted transient Failed startup-race messages) must last after crossing its count threshold before forwarding (experimental). 0 (the default) leaves count-only timing unchanged; e.g. --settle=2m opts into the settle hold and reports forwarded vs self_resolved outcomes on lookout_watch_gate_outcomes_total{gate=settle}. FailedMount, Unhealthy, ImagePullBackOff, FailedScheduling, OOMKilled, Evicted, NodeNotReady, NetworkNotReady, and non-allowlisted Failed are exempt. Must be >= 0.")
 
 	// Recovery injects (§7.4).
 	fs.DurationVar(&f.recoveryStableFor, "recovery-stable-for", 5*time.Minute, "How long a cleared symptom must stay clear before kind=resolved is injected into the incident's session; recurrence within this window after a resolve fires kind=resolved.reverted. 0 disables recovery tracking.")
@@ -981,6 +983,9 @@ func (f *flags) validate() error {
 	}
 	if f.scaleUpHold < 0 {
 		return errors.New("--scaleup-hold must be >= 0 (0 disables the TriggeredScaleUp hold)")
+	}
+	if f.settle < 0 {
+		return errors.New("--settle must be >= 0 (0 disables the settle gate)")
 	}
 	switch f.mode {
 	case "per-incident":

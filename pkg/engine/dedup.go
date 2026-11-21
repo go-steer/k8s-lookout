@@ -1027,6 +1027,30 @@ func (c *DedupCache) LookupSession(key EventKey) (string, bool) {
 	return entry.SessionID, true
 }
 
+// LastRetiredTS returns the last processed Event timestamp (EventLastTS) of a
+// resolved incident for key — whether still awaiting retirement in entries or
+// already retired into a #816 replay tombstone — without mutating or deleting
+// either record (#834).
+//
+// Used by the --settle hold tracker to clamp a repeat blip inside the API
+// server's 1h Event TTL to its own first sighting instead of the resolved
+// incident's old FirstTimestamp.
+func (c *DedupCache) LastRetiredTS(key EventKey) (time.Time, bool) {
+	if c == nil {
+		return time.Time{}, false
+	}
+	key.Reason = CanonicalReason(key.Reason)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.entries[key]; ok && entry.Resolved && !entry.EventLastTS.IsZero() {
+		return entry.EventLastTS, true
+	}
+	if tomb, ok := c.tombstones[key]; ok && !tomb.EventLastTS.IsZero() {
+		return tomb.EventLastTS, true
+	}
+	return time.Time{}, false
+}
+
 // SourceFamily buckets a signal kind by the source implementation
 // that emits it — the prefix before the first "." for the
 // source-namespaced kinds ("capacity.quota_blocked" → "capacity",
