@@ -216,9 +216,11 @@ have it. On Google Managed Prometheus the equivalent is a
 
 ### Something to look at
 
-`deploy/dashboards/leeway.json` is a Grafana dashboard over the
-placement subsystem — drift, compute-class ranks, and the SLIs that say
-whether either is being measured correctly. Import the JSON, or apply
+`deploy/dashboards/leeway.json` is a legacy Grafana dashboard over the
+deprecated in-tree placement subsystem ([#842](https://github.com/go-steer/k8s-lookout/issues/842)
+— superseded by [`github.com/go-steer/leeway`](https://github.com/go-steer/leeway)).
+For deployments still explicitly running `topology-drift` or
+`compute-class` during the deprecation window, import the JSON or apply
 the ConfigMap wrapper for the Grafana sidecar:
 
 ```sh

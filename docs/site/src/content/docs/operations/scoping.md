@@ -9,8 +9,8 @@ The canonical deployment is one sentinel per cluster watching
 everything, and it is the right default: one informer cache, one
 topology graph, one credential boundary. This page is for the cases
 where it is not — where a cluster has namespaces you have no business
-watching, or where you want the drift counters without also running
-the event watcher.
+watching, or where you want to isolate a project-scoped source into its
+own deployment.
 
 There are two axes to cut along, and they compose: **which namespaces**
 a sentinel watches, and **which sources** it runs.
@@ -119,11 +119,11 @@ cannot grant. So there are two supported tiers:
 
 | Tier | Grants | What runs |
 | --- | --- | --- |
-| **Default** (`deploy-namespaced/`, chart `rbac.scope=namespace`) | a Role per namespace, plus a ClusterRole that can only read nodes and PersistentVolumes | everything except `compute-class` and `expiry` |
+| **Default** (`deploy-namespaced/`, chart `rbac.scope=namespace`) | a Role per namespace, plus a ClusterRole that can only read nodes and PersistentVolumes | every auto-enabled source except `expiry` |
 | **Strict** (`deploy-namespaced-strict/`, plus chart `rbac.nodes=false`) | Roles only | `k8s-events`, `rollout`, `workload`, `autoscaling`, `degradation`, `ingress`, and `gateway` if its CRDs are installed |
 
-The strict tier also loses `object-state`, `saturation`, `capacity`,
-`topology-drift` and storm correlation. Under the default
+The strict tier also loses `object-state`, `saturation`, `capacity`, and
+storm correlation. Under the default
 `--sources=auto`, each source a tier cannot run is skipped with one log
 line naming the missing permission, and `--storm=auto` resolves to off
 the same way. Naming a skipped source in `--sources`, or setting
@@ -421,8 +421,8 @@ caller's identity. Design and security review:
 sentinel to run all of them:
 
 ```
-# A sentinel that only tracks topology drift.
-lookout watch --sources=topology-drift
+# A project-tier sentinel that only tracks GCP quota.
+lookout watch --sources=quota
 
 # A sentinel that only watches Events.
 lookout watch --sources=k8s-events
@@ -431,7 +431,7 @@ lookout watch --sources=k8s-events
 An explicit list also changes failure semantics in a way that is
 useful here: under `--sources=auto` a source whose grants are missing
 is skipped with a log line, but a **named** source's missing required
-grant is fatal. If you deployed a sentinel *for* drift, you want it to
+grant is fatal. If you deployed a sentinel *for* quota, you want it to
 refuse to start rather than to run as an expensive no-op.
 
 ### Which splits are free, and which cost a cache
@@ -450,7 +450,6 @@ objects?
 | `object-state` | Pods, Nodes, Deployments, EndpointSlices, PDBs |
 | `rollout` | Deployments, ReplicaSets, StatefulSets, Pods |
 | `degradation` | Pods, EndpointSlices |
-| `topology-drift` | Pods, Nodes, ReplicaSets |
 | `workload` | Jobs, CronJobs |
 | `autoscaling` | HorizontalPodAutoscalers |
 | `gateway` | Gateway API objects (its own factory) |
@@ -465,12 +464,12 @@ So:
   of them shares an informer with anything else, so moving one into
   its own deployment costs only the process.
 - **Expensive to separate:** anything in the Pods/Nodes/Events core —
-  `object-state`, `rollout`, `degradation`, `topology-drift`,
-  `capacity`, `k8s-events`, `ingress`. Pull `topology-drift` into its
-  own sentinel and you now run two pod caches where you ran one, and
-  the pod cache is the single largest thing the process holds. Do it
-  because you want a different blast radius or a different credential,
-  not to save memory — it will not.
+  `object-state`, `rollout`, `degradation`, `capacity`, `k8s-events`,
+  `ingress`. Pull `object-state` into its own sentinel and you now run
+  two pod caches where you ran one, and the pod cache is the single
+  largest thing the process holds. Do it because you want a different
+  blast radius or a different credential, not to save memory — it will
+  not.
 
 `quota` and `notifications` are already deployed this way in a fleet:
 they describe a *project*, not a cluster, so a multi-cluster sentinel
@@ -499,5 +498,5 @@ half needs its own `--store` path and its own sink configuration.
 
 None of that argues against splitting — it argues for splitting along
 a line where the two halves would not have correlated anyway. A
-drift-only or a quota-only sentinel is a clean cut. Splitting
+quota-only or notifications-only sentinel is a clean cut. Splitting
 `object-state` from `rollout` is not.

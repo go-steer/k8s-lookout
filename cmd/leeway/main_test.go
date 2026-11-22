@@ -167,3 +167,61 @@ func TestRealMain_FlagValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestRealMain_DeprecationWarningStderrNeverStdout(t *testing.T) {
+	runCapture := func(t *testing.T, args ...string) (code int, stdout, stderr string) {
+		t.Helper()
+		dir := t.TempDir()
+		outPath := filepath.Join(dir, "stdout")
+		errPath := filepath.Join(dir, "stderr")
+		outFile, err := os.Create(outPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer outFile.Close()
+		errFile, err := os.Create(errPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer errFile.Close()
+
+		code = realMain(args, outFile, errFile)
+		outBytes, err := os.ReadFile(outPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		errBytes, err := os.ReadFile(errPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return code, string(outBytes), string(errBytes)
+	}
+
+	code, stdout, stderr := runCapture(t, "--version")
+	if code != 0 || stderr != "" || stdout == "" {
+		t.Fatalf("--version: code=%d stdout=%q stderr=%q, want exit 0 with stdout only", code, stdout, stderr)
+	}
+
+	code, stdout, stderr = runCapture(t, "--help")
+	if code != 0 || stdout != "" || !strings.Contains(stderr, "DEPRECATED (#842): superseded by github.com/go-steer/leeway") {
+		t.Fatalf("--help: code=%d stdout=%q stderr=%q, want exit 0 with deprecation usage on stderr only", code, stdout, stderr)
+	}
+
+	missingKubeconfig := filepath.Join(t.TempDir(), "does-not-exist")
+	code, stdout, stderr = runCapture(t, "--kubeconfig="+missingKubeconfig, "--metrics-addr=")
+	if code != 1 {
+		t.Fatalf("runtime invocation code=%d, want 1 (stderr=%q)", code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("runtime invocation wrote %d bytes to stdout (%q); deprecation warnings must go to stderr only", len(stdout), stdout)
+	}
+	var warnLines int
+	for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		if strings.Contains(line, "deprecated") && strings.Contains(line, "github.com/go-steer/leeway") {
+			warnLines++
+		}
+	}
+	if warnLines != 1 {
+		t.Fatalf("runtime stderr had %d deprecation warning lines, want 1; full stderr:\n%s", warnLines, stderr)
+	}
+}

@@ -221,6 +221,7 @@ deployment's `.agents/skills/`.
 | Repo | Role |
 | --- | --- |
 | [`core-agent`](https://github.com/go-steer/core-agent) | the agent daemon; lookout talks to it over `POST /sessions` + `/inject` |
+| [`leeway`](https://github.com/go-steer/leeway) | standalone placement-skew and GKE `ComputeClass` fallback analyzer (`leeway report`); `lookout audit computeclass` and `capacity` import its pure Go scoring/verdict package |
 
 ## Documentation
 

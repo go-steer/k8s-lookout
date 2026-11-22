@@ -14,11 +14,9 @@ the known gaps). Hard rules for contributors are in
 k8s-lookout/
 ├── cmd/lookout/          # multicall entrypoint: subcommand dispatch, --help, provider
 │                         #   blank-imports behind build tags, nm-based isolation test
-├── cmd/leeway/           # the ONE exception to §4.1's single binary: the placement
-│                         #   subsystem standalone, metrics-only, no store and no inject
-│                         #   path. Never run alongside `lookout watch` (both build a Pod
-│                         #   informer). It is also the enforcement: the day a source
-│                         #   reaches into internal/watch, this stops compiling
+├── cmd/leeway/           # DEPRECATED (#842, superseded by github.com/go-steer/leeway):
+│                         #   standalone metrics-only placement binary retained during the
+│                         #   Phase 1 deprecation window (and layering_test.go enforcement)
 ├── internal/
 │   ├── axsink/           # AX agent sink implementation (task lifecycle + fast-path delivery)
 │   ├── axapi/            # Generated AX wire types
@@ -54,7 +52,8 @@ k8s-lookout/
 │   ├── inject/           # agent sinks behind the two-verb Sink interface (core-agent
 │   │                     #   daemon client + generic webhook) + FROZEN wire payload types
 │   ├── kube/             # client bootstrap (kubeconfig/in-cluster), informer trimming + paging
-│   ├── leeway/           # shared placement intent & drift math used by topologydrift/computeclass
+│   ├── leeway/           # DEPRECATED (#842): in-tree placement copy retained for Phase 1;
+│   │                     #   audit computeclass + capacity import github.com/go-steer/leeway/pkg/leeway
 │   ├── memory/           # §9.2/§9.4 record types (distilled facts, triage-status) bound
 │   │                     #   to the sentinel store until core-agent ships a Memory surface
 │   ├── policy/           # four-layer posture policy engine + built-in profiles
@@ -271,9 +270,10 @@ Where the tree deliberately differs from DESIGN.md, in one place:
     and the `emit.Finding` (`--format=findings`) audit ledger seam.
   - [`findings-diff-design.md`](./findings-diff-design.md) — stateful
     finding transition stream (`lookout findings diff` and `findings ack`).
-  - [`leeway-design.md`](./leeway-design.md) — placement-drift detection
-    (`pkg/leeway`, watch sources `topology-drift` & `compute-class`,
-    read-path `audit computeclass`, and standalone `cmd/leeway`).
+  - [`leeway-design.md`](./leeway-design.md) — placement-drift design
+    (watch sources `topology-drift` & `compute-class`, in-tree `pkg/leeway`,
+    and `cmd/leeway` are deprecated in #842 in favor of
+    `github.com/go-steer/leeway`; read-path `audit computeclass` stays).
   - [`in-pod-probe-design.md`](./in-pod-probe-design.md) — `net probe-from`,
     the opt-in privileged ephemeral-container probe (`deploy-probe/`).
   - [`multi-cluster-design.md`](./multi-cluster-design.md) and

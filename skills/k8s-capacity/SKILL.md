@@ -155,16 +155,18 @@ path), using the draft's `quota_id`, `region`, `suggested_limit`, and
 lookout command that writes to the cloud — if you find yourself reaching
 for one, you are outside the design.
 
-## Right-sizing, scale-down blockers, and placement drift
+## Right-sizing, scale-down blockers, and ComputeClass posture
 
-When capacity pressure or cost waste comes from over-requested workloads or
-nodes the cluster autoscaler cannot remove, pair the utilization read with
-the scale-down blocker sweep:
+When capacity pressure or cost waste comes from over-requested workloads,
+nodes the cluster autoscaler cannot remove, or fragile ComputeClass / Spot
+placement specs, pair the utilization read with the scale-down blocker and
+ComputeClass posture sweeps:
 
 ```lookout
 lookout stab scaledown
 lookout triage top -A
 lookout triage top --namespace=prod --history=24h
+lookout audit computeclass -A
 ```
 
 - `stab scaledown` identifies underutilized nodes (`< --utilization`,
@@ -176,10 +178,11 @@ lookout triage top --namespace=prod --history=24h
   configured) contrasts actual CPU/memory usage against limits and flags
   `top.unrequested` / `top.unlimited` containers so you can right-size
   before requesting more quota.
-- For continuous placement and compute-class drift signals (`topology-drift`
-  and `compute-class` sources in `lookout watch`, or the standalone
-  metrics-only `leeway` binary), watch for workloads that have drifted off
-  their intended fault domains or compute classes during scale-ups.
+- `audit computeclass` checks static GKE `ComputeClass`, Spot fallback,
+  accelerator-zone, and single-zone node-pool posture (also included in
+  `lookout audit all -A`). For live pod placement-skew and `ComputeClass`
+  priority-rank drift analysis with remediation patches, use standalone
+  [`go-steer/leeway`](https://github.com/go-steer/leeway) (`leeway report`).
 
 ## Record the conclusion
 

@@ -24,10 +24,12 @@ The §14 phase plan in [`docs/DESIGN.md`](./docs/DESIGN.md) is
   YAML `--policy` overlays, `lookout audit policy`, `--exemptions`,
   `--format=findings`, and stateful transition streams (`findings diff`,
   `findings ack`).
-- **Optional-CRD & placement-drift coverage** — discovery-gated
+- **Optional-CRD & ComputeClass posture coverage** — discovery-gated
   `state gateway`, `state keda`, and `state kcc` (`*.cnrm.cloud.google.com`),
-  plus runtime placement-drift sources (`topology-drift`, `compute-class`)
-  and standalone `cmd/leeway`.
+  plus static `audit computeclass` posture checks (live placement-drift
+  watch sources `topology-drift` / `compute-class` and in-tree `cmd/leeway`
+  are deprecated in [#842](https://github.com/go-steer/k8s-lookout/issues/842)
+  in favor of [`go-steer/leeway`](https://github.com/go-steer/leeway)).
 - **Multi-cluster & multi-tenant surfaces** — read-path fleet fan-out
   (`--contexts`, `--kubeconfig-dir`, `--concurrency`), multi-cluster
   sentinel/MCP (`--clusters-from`), and per-caller Google OAuth identity

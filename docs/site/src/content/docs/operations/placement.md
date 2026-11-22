@@ -1,23 +1,37 @@
 ---
-title: Tuning placement findings
-description: What the three confidence tiers mean, which flags move each one, how to keep the per-domain series under control, and the SLIs that say whether the numbers are worth reading at all.
+title: Tuning placement findings (deprecated)
+description: Legacy reference for the deprecated topology-drift and compute-class watch sources — migrate to github.com/go-steer/leeway (leeway report) and lookout audit computeclass.
 sidebar:
   order: 9
 ---
 
-Two of the sentinel's sources answer questions nothing else in a cluster
-does. `topology-drift` asks whether a workload's objects are spread the
-way somebody meant them to be. `compute-class` asks whether the nodes a
-workload actually landed on are the ones its compute class preferred.
-Both emit under the `leeway.` prefix, both are on by default, and both
-are quiet on a cluster where nothing has moved.
+:::caution[Deprecated — moved to `github.com/go-steer/leeway`]
+The `topology-drift` and `compute-class` sources in `lookout watch`, all
+`--topology-*` and `--compute-class-*` flags, and the `LeewayPolicy` /
+`ClusterLeewayPolicy` CRDs are **no longer enabled under
+`--sources=auto`** and are **deprecated**
+([#842](https://github.com/go-steer/k8s-lookout/issues/842)). Explicitly
+naming either source or flag emits a single-line deprecation warning to
+`stderr` and will be removed after the CLI stability window. Use
+[`github.com/go-steer/leeway`](https://github.com/go-steer/leeway)
+(`leeway report`) for placement and `ComputeClass` fallback sweeps, and
+`lookout audit computeclass` for static spec posture checks.
+:::
 
-This page is about turning them up and down. For what each flag does
-line by line see the [`watch` reference](/reference/watch/); for what
-each metric is see the [metrics reference](/reference/metrics/); for
-running the subsystem as its own process see [The standalone `leeway`
-binary](/operations/leeway-standalone/). There is a [prebuilt Grafana
-dashboard](#the-dashboard) over everything on this page.
+Two legacy sentinel sources measure runtime placement drift:
+`topology-drift` checks whether a workload's objects are spread the way
+somebody meant them to be, and `compute-class` checks whether the nodes a
+workload actually landed on are the ones its compute class preferred.
+Both emit under the `leeway.` prefix, neither is enabled by default under
+`--sources=auto`, and both remain available only when explicitly named in
+`--sources` during the deprecation window.
+
+This page documents their legacy knobs for existing deployments completing
+migration. For what each flag does line by line see the
+[`watch` reference](/reference/watch/); for what each metric is see the
+[metrics reference](/reference/metrics/); for migration guidance see
+[Standalone leeway (deprecated)](/operations/leeway-standalone/). There is
+a [prebuilt Grafana dashboard](#the-dashboard) over the legacy metrics.
 
 ## The three tiers
 

@@ -178,21 +178,25 @@ type flags struct {
 	// lines, so realMain's Probe pass skips re-reporting them (#145
 	// review finding 3 — one fact, one line).
 	sourcesAutoResolved bool
-	inCluster           bool
-	kubeconfig          string
-	kubeQPS             float64
-	kubeBurst           int
-	clusterName         string
-	clusters            string
-	clustersFrom        string
-	project             string
-	region              string
-	zone                string
-	logLevel            string
-	dryRun              bool
-	metricsAddr         string
-	snapshotInterval    time.Duration
-	otelExporter        string
+	// setFlags records flag names explicitly passed on argv (populated by
+	// fs.Visit in parseFlags) so deprecation warnings fire even when a
+	// deprecated flag is explicitly passed with its default value.
+	setFlags         []string
+	inCluster        bool
+	kubeconfig       string
+	kubeQPS          float64
+	kubeBurst        int
+	clusterName      string
+	clusters         string
+	clustersFrom     string
+	project          string
+	region           string
+	zone             string
+	logLevel         string
+	dryRun           bool
+	metricsAddr      string
+	snapshotInterval time.Duration
+	otelExporter     string
 }
 
 // parseFlags reads argv into flags. Returns nil on --help (main
@@ -203,6 +207,9 @@ func parseFlags(args []string) (*flags, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
+	fs.Visit(func(fl *flag.Flag) {
+		f.setFlags = append(f.setFlags, fl.Name)
+	})
 	return f, nil
 }
 
@@ -254,7 +261,7 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// explicit list keeps the original §11 semantics exactly: every
 	// named source's probe failure is fatal, and --sources=k8s-events
 	// reproduces the old default byte-for-byte.
-	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, workload, autoscaling, saturation, degradation, expiry, capacity, ingress, gateway, topology-drift, compute-class, quota, notifications, token-burn. quota (project tier), notifications (needs --notifications-subscription), and token-burn (core-agent cost stack) are never auto-enabled. An explicit list keeps §11 semantics: a named source's missing REQUIRED grant is fatal (optional dimensions — saturation's nodes/proxy PVC read — still degrade loudly instead, issue #145).")
+	fs.StringVar(&f.sources, "sources", autoValue, "Comma-separated signal sources to enable, or auto (the default): probe the portable sources' needs at startup — RBAC via SelfSubjectAccessReview, plus metrics.k8s.io presence for saturation — and enable what this deployment supports, skipping misses with one loud line each (k8s-events must pass; a sentinel that cannot watch events is misdeployed). Known sources: k8s-events, object-state, rollout, workload, autoscaling, saturation, degradation, expiry, capacity, ingress, gateway, topology-drift, compute-class, quota, notifications, token-burn. quota (project tier), notifications (needs --notifications-subscription), token-burn (core-agent cost stack), and the deprecated topology-drift and compute-class sources (use github.com/go-steer/leeway) are never auto-enabled. An explicit list keeps §11 semantics: a named source's missing REQUIRED grant is fatal (optional dimensions — saturation's nodes/proxy PVC read — still degrade loudly instead, issue #145).")
 
 	// §11 capability re-check (issue #385). The startup probe is a
 	// point-in-time answer; this is the same question asked again for
@@ -308,20 +315,20 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// cluster partitions on, whether to pay for the per-subject series,
 	// how patient to be before calling motion drift, and — since §7.5 —
 	// what the learned baselines are allowed to do.
-	fs.StringVar(&f.topologyKeys, "topology-keys", strings.Join(defaultTopologyKeys(), ","), "Comma-separated node labels the topology-drift source treats as topology axes, in precedence order. The defaults are the two standard well-known labels; a cluster that partitions on something else (a rack or cell label) names it here.")
-	fs.StringVar(&f.topologyDefaults, "topology-cluster-defaults", "", "Your cluster's kube-scheduler PodTopologySpread defaultConstraints, as `key=maxSkew[:DoNotSchedule|ScheduleAnyway]` comma-separated — they are not readable from a managed control plane, so leeway cannot find them out. THREE STATES: leave this unset and the upstream system defaults are ASSUMED (every intent from them is labelled source=cluster-default-assumed and can never raise a critical finding); pass \"none\" to assert your cluster configures none; or name them to be scored against your real numbers. These only ever apply to pods that declare no topologySpreadConstraints of their own.")
-	fs.BoolVar(&f.topologyPerDomain, "topology-per-domain-series", false, "Export lookout_leeway_domain_objects and lookout_leeway_domain_expected for EVERY tracked subject, not only the drifting ones. OFF by default because the count is multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k for every other leeway metric combined. See --topology-per-domain-min-drift for what you get without it. Turn this on to debug one cluster's placement, not as a standing posture.")
-	fs.Float64Var(&f.topologyMinDrift, "topology-per-domain-min-drift", topologydrift.DefaultPerDomainSeriesMinDrift, "Drift (ρ, the fraction of a subject's objects that would have to move) at which a subject's per-domain breakdown is exported anyway. The default keeps the breakdown for the subjects somebody is about to investigate and withholds it for the rest, which is what makes the standing cost the aggregate one. Pass a negative value for every scored subject; --topology-per-domain-series overrides this entirely.")
-	fs.IntVar(&f.topologyMaxKeys, "topology-per-domain-max-keys", topologydrift.DefaultPerDomainMaxKeys, "How many topology axes one subject may contribute a per-domain breakdown on. A cluster that names five or six axes in --topology-keys multiplies every admitted subject's series by that many, and the axes past the first two or three are almost never the one being read. Which survive is the --topology-keys precedence order, so the cap is stable across scrapes rather than following whichever axis drifted. What it dropped is counted by lookout_leeway_domain_series_withheld{reason=\"key_cap\"}. Pass a negative value for no cap.")
-	fs.BoolVar(&f.topologyCollapse, "topology-per-domain-collapse-states", true, "Halve the per-domain series count by folding the four scheduling states onto two labels: state=\"active\" for an object holding the domain's capacity (running or terminating) and state=\"waiting\" for one that is not (pending or unschedulable). The distinction §7.6 needs between the four is upstream of the metric and is unaffected — this changes the label, not the count or any finding. Turn it off to get running/pending/unschedulable/terminating back, at twice the series.")
-	fs.StringVar(&f.topologyDomainNS, "topology-per-domain-namespaces", "", "Comma-separated namespaces whose subjects may export a per-domain breakdown. Empty — the default — admits every namespace, so this is the narrowing knob for a cluster that wants the breakdown standing for the namespaces it cares about and the aggregate everywhere else. Cluster-scoped subjects (node groups, and the domains themselves) are never filtered by this: they belong to no namespace, and dropping them would silently remove the cluster-wide reading. What it dropped is counted by lookout_leeway_domain_series_withheld{reason=\"namespace\"}.")
-	fs.StringVar(&f.topologyDomainNotNS, "topology-per-domain-exclude-namespaces", "", "Comma-separated namespaces whose subjects never export a per-domain breakdown, applied AHEAD of --topology-per-domain-namespaces — naming a namespace in both excludes it. This is the knob for the one churning namespace that dominates the series count; it does not stop the namespace being watched, scored or alerted on, only its per-domain breakdown being exported.")
-	fs.DurationVar(&f.topologyDwell, "topology-dwell", leeway.DefaultDwell().For, "How long a placement breach must persist before the topology-drift source raises a finding (§8.2). Placement is rebuilt constantly — by rollouts, by the descheduler, by a drain — so the dwell is what separates drift from motion. Shorter pages you during a routine rollout; the resolve dwell (30m) and the flap guard are not separately tunable.")
-	fs.Float64Var(&f.topologyCapacityRatio, "topology-capacity-ratio", leeway.CapacityWeightingRatioTrigger, "How unequal a subject's eligible zones have to be, as a max/min ratio of allocatable CPU, before an even split stops being the expectation and capacity does (§7.2). Three zones where one is a quarter the size of the others cannot hold a third of anything; scoring them evenly reports drift on a cluster behaving exactly as its shape requires. Applies only where nobody declared a weighting — a policy that names one is always honoured. Raise it to keep the even expectation on mildly uneven clusters; below 1 it fires on any inequality at all. Must be > 0.")
-	fs.StringVar(&f.topologyNodeGroupKeys, "topology-node-group-keys", strings.Join(topologydrift.DefaultNodeGroupLabelKeys, ","), "Comma-separated node labels a node group's name is read from, in precedence order, first match wins (FR-3). Node groups are tracked as subjects of their own, so a pool that was configured for three zones and has all its nodes in one is one finding naming the pool rather than one per workload riding it. Compute class comes before node pool in the default because auto-provisioned pools are named per machine type and are numerous and short-lived. A label that is unique per node turns every node into a group — see --topology-max-node-groups, which is what stops that reaching your metrics.")
-	fs.IntVar(&f.topologyMaxNodeGroups, "topology-max-node-groups", topologydrift.DefaultMaxNodeGroups, "How many node groups may be tracked before leeway tracks none of them. Past the bound nothing is scored and nothing is exported except the discovered count, which is the reading that sends you to --topology-node-group-keys; truncating instead would score an arbitrary subset that changes every pass. Pass a negative value to turn node-group subjects off entirely.")
-	fs.StringVar(&f.topologyDomainKeys, "topology-domain-unavailable-keys", strings.Join(defaultDomainUnavailableKeys(), ","), "Comma-separated topology axes on which a domain with no usable node raises leeway.domain_unavailable (§2.3). The subject is the domain, so a zone that goes away is one finding for the cluster instead of one per workload that drifted because of it, and the workloads stay suppressed. Defaults to zone and region. Only name axes whose domains hold many nodes: an axis that is unique per node — kubernetes.io/hostname is one, and is a topology key — would raise a finding per NotReady node, which is objectstate's job and not this one. Pass an empty string to turn the detector off.")
-	fs.BoolVar(&f.topologyTierC, "topology-tier-c-signals", false, "Put Tier C topology-drift findings on the wire (§8.3). Tier C is the tier where nobody declared anything: the workload expressed no spread constraint or anti-affinity, so it was scored against an even apportionment over the domains it can reach — or, once one is learned, against its own §7.5 baseline — and a breach says \"this changed\" rather than \"this is wrong\". Those findings are exported as metrics only by default. Tiers A and B — a declared contract, or an intent inferred from what the workload does say — always signal.")
+	fs.StringVar(&f.topologyKeys, "topology-keys", strings.Join(defaultTopologyKeys(), ","), "Deprecated (use github.com/go-steer/leeway): Comma-separated node labels the topology-drift source treats as topology axes, in precedence order. The defaults are the two standard well-known labels; a cluster that partitions on something else (a rack or cell label) names it here.")
+	fs.StringVar(&f.topologyDefaults, "topology-cluster-defaults", "", "Deprecated (use github.com/go-steer/leeway): Your cluster's kube-scheduler PodTopologySpread defaultConstraints, as `key=maxSkew[:DoNotSchedule|ScheduleAnyway]` comma-separated — they are not readable from a managed control plane, so leeway cannot find them out. THREE STATES: leave this unset and the upstream system defaults are ASSUMED (every intent from them is labelled source=cluster-default-assumed and can never raise a critical finding); pass \"none\" to assert your cluster configures none; or name them to be scored against your real numbers. These only ever apply to pods that declare no topologySpreadConstraints of their own.")
+	fs.BoolVar(&f.topologyPerDomain, "topology-per-domain-series", false, "Deprecated (use github.com/go-steer/leeway): Export lookout_leeway_domain_objects and lookout_leeway_domain_expected for EVERY tracked subject, not only the drifting ones. OFF by default because the count is multiplicative: roughly 480k series on a 20k-subject cluster, against ~3.5k for every other leeway metric combined. See --topology-per-domain-min-drift for what you get without it. Turn this on to debug one cluster's placement, not as a standing posture.")
+	fs.Float64Var(&f.topologyMinDrift, "topology-per-domain-min-drift", topologydrift.DefaultPerDomainSeriesMinDrift, "Deprecated (use github.com/go-steer/leeway): Drift (ρ, the fraction of a subject's objects that would have to move) at which a subject's per-domain breakdown is exported anyway. The default keeps the breakdown for the subjects somebody is about to investigate and withholds it for the rest, which is what makes the standing cost the aggregate one. Pass a negative value for every scored subject; --topology-per-domain-series overrides this entirely.")
+	fs.IntVar(&f.topologyMaxKeys, "topology-per-domain-max-keys", topologydrift.DefaultPerDomainMaxKeys, "Deprecated (use github.com/go-steer/leeway): How many topology axes one subject may contribute a per-domain breakdown on. A cluster that names five or six axes in --topology-keys multiplies every admitted subject's series by that many, and the axes past the first two or three are almost never the one being read. Which survive is the --topology-keys precedence order, so the cap is stable across scrapes rather than following whichever axis drifted. What it dropped is counted by lookout_leeway_domain_series_withheld{reason=\"key_cap\"}. Pass a negative value for no cap.")
+	fs.BoolVar(&f.topologyCollapse, "topology-per-domain-collapse-states", true, "Deprecated (use github.com/go-steer/leeway): Halve the per-domain series count by folding the four scheduling states onto two labels: state=\"active\" for an object holding the domain's capacity (running or terminating) and state=\"waiting\" for one that is not (pending or unschedulable). The distinction §7.6 needs between the four is upstream of the metric and is unaffected — this changes the label, not the count or any finding. Turn it off to get running/pending/unschedulable/terminating back, at twice the series.")
+	fs.StringVar(&f.topologyDomainNS, "topology-per-domain-namespaces", "", "Deprecated (use github.com/go-steer/leeway): Comma-separated namespaces whose subjects may export a per-domain breakdown. Empty — the default — admits every namespace, so this is the narrowing knob for a cluster that wants the breakdown standing for the namespaces it cares about and the aggregate everywhere else. Cluster-scoped subjects (node groups, and the domains themselves) are never filtered by this: they belong to no namespace, and dropping them would silently remove the cluster-wide reading. What it dropped is counted by lookout_leeway_domain_series_withheld{reason=\"namespace\"}.")
+	fs.StringVar(&f.topologyDomainNotNS, "topology-per-domain-exclude-namespaces", "", "Deprecated (use github.com/go-steer/leeway): Comma-separated namespaces whose subjects never export a per-domain breakdown, applied AHEAD of --topology-per-domain-namespaces — naming a namespace in both excludes it. This is the knob for the one churning namespace that dominates the series count; it does not stop the namespace being watched, scored or alerted on, only its per-domain breakdown being exported.")
+	fs.DurationVar(&f.topologyDwell, "topology-dwell", leeway.DefaultDwell().For, "Deprecated (use github.com/go-steer/leeway): How long a placement breach must persist before the topology-drift source raises a finding (§8.2). Placement is rebuilt constantly — by rollouts, by the descheduler, by a drain — so the dwell is what separates drift from motion. Shorter pages you during a routine rollout; the resolve dwell (30m) and the flap guard are not separately tunable.")
+	fs.Float64Var(&f.topologyCapacityRatio, "topology-capacity-ratio", leeway.CapacityWeightingRatioTrigger, "Deprecated (use github.com/go-steer/leeway): How unequal a subject's eligible zones have to be, as a max/min ratio of allocatable CPU, before an even split stops being the expectation and capacity does (§7.2). Three zones where one is a quarter the size of the others cannot hold a third of anything; scoring them evenly reports drift on a cluster behaving exactly as its shape requires. Applies only where nobody declared a weighting — a policy that names one is always honoured. Raise it to keep the even expectation on mildly uneven clusters; below 1 it fires on any inequality at all. Must be > 0.")
+	fs.StringVar(&f.topologyNodeGroupKeys, "topology-node-group-keys", strings.Join(topologydrift.DefaultNodeGroupLabelKeys, ","), "Deprecated (use github.com/go-steer/leeway): Comma-separated node labels a node group's name is read from, in precedence order, first match wins (FR-3). Node groups are tracked as subjects of their own, so a pool that was configured for three zones and has all its nodes in one is one finding naming the pool rather than one per workload riding it. Compute class comes before node pool in the default because auto-provisioned pools are named per machine type and are numerous and short-lived. A label that is unique per node turns every node into a group — see --topology-max-node-groups, which is what stops that reaching your metrics.")
+	fs.IntVar(&f.topologyMaxNodeGroups, "topology-max-node-groups", topologydrift.DefaultMaxNodeGroups, "Deprecated (use github.com/go-steer/leeway): How many node groups may be tracked before leeway tracks none of them. Past the bound nothing is scored and nothing is exported except the discovered count, which is the reading that sends you to --topology-node-group-keys; truncating instead would score an arbitrary subset that changes every pass. Pass a negative value to turn node-group subjects off entirely.")
+	fs.StringVar(&f.topologyDomainKeys, "topology-domain-unavailable-keys", strings.Join(defaultDomainUnavailableKeys(), ","), "Deprecated (use github.com/go-steer/leeway): Comma-separated topology axes on which a domain with no usable node raises leeway.domain_unavailable (§2.3). The subject is the domain, so a zone that goes away is one finding for the cluster instead of one per workload that drifted because of it, and the workloads stay suppressed. Defaults to zone and region. Only name axes whose domains hold many nodes: an axis that is unique per node — kubernetes.io/hostname is one, and is a topology key — would raise a finding per NotReady node, which is objectstate's job and not this one. Pass an empty string to turn the detector off.")
+	fs.BoolVar(&f.topologyTierC, "topology-tier-c-signals", false, "Deprecated (use github.com/go-steer/leeway): Put Tier C topology-drift findings on the wire (§8.3). Tier C is the tier where nobody declared anything: the workload expressed no spread constraint or anti-affinity, so it was scored against an even apportionment over the domains it can reach — or, once one is learned, against its own §7.5 baseline — and a breach says \"this changed\" rather than \"this is wrong\". Those findings are exported as metrics only by default. Tiers A and B — a declared contract, or an intent inferred from what the workload does say — always signal.")
 
 	// Baseline knobs (§7.5). The three here are the ones with a visible
 	// effect: whether to learn at all, how long "normal" remembers, and
@@ -330,9 +337,9 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// flags — they all fail closed towards fewer and later findings, and
 	// an operator who wants fewer of those has --topology-tier-c-signals
 	// and the band width, both of which they can reason about.
-	fs.BoolVar(&f.topologyLearn, "topology-learn-baselines", true, "Learn each workload's normal placement, so that a workload which declared no spread constraint is scored against what it actually does instead of against an even split (§7.5). Learning is passive and cheap: it samples every subject once a minute, matures after 6h, and only ever applies where nothing else expressed an intent — it cannot override a declared constraint. Turn it off to score every undeclared workload against an even apportionment, which is what happened before this existed.")
-	fs.DurationVar(&f.topologyHalfLife, "topology-baseline-half-life", leeway.DefaultBaselineConfig().HalfLife, "How long a learned baseline takes to half-absorb a step change in placement. Shorter follows a cluster that is legitimately rebalancing and stops calling it drift; longer keeps a longer memory of normal and so keeps noticing a slow slide that a short half-life would quietly adopt as the new normal. Must be > 0.")
-	fs.Float64Var(&f.topologyBand, "topology-baseline-band", leeway.DefaultBaselineConfig().K, "How many learned deviations wide a baseline's tolerance band is — the false-positive knob for Tier C. A subject breaches when a domain's share leaves the band around what it learned. Raise it if learned baselines are noisy on your cluster; the default is deliberately wide, because Tier C is the tier where nobody asked to be watched. Must be > 0.")
+	fs.BoolVar(&f.topologyLearn, "topology-learn-baselines", true, "Deprecated (use github.com/go-steer/leeway): Learn each workload's normal placement, so that a workload which declared no spread constraint is scored against what it actually does instead of against an even split (§7.5). Learning is passive and cheap: it samples every subject once a minute, matures after 6h, and only ever applies where nothing else expressed an intent — it cannot override a declared constraint. Turn it off to score every undeclared workload against an even apportionment, which is what happened before this existed.")
+	fs.DurationVar(&f.topologyHalfLife, "topology-baseline-half-life", leeway.DefaultBaselineConfig().HalfLife, "Deprecated (use github.com/go-steer/leeway): How long a learned baseline takes to half-absorb a step change in placement. Shorter follows a cluster that is legitimately rebalancing and stops calling it drift; longer keeps a longer memory of normal and so keeps noticing a slow slide that a short half-life would quietly adopt as the new normal. Must be > 0.")
+	fs.Float64Var(&f.topologyBand, "topology-baseline-band", leeway.DefaultBaselineConfig().K, "Deprecated (use github.com/go-steer/leeway): How many learned deviations wide a baseline's tolerance band is — the false-positive knob for Tier C. A subject breaches when a domain's share leaves the band around what it learned. Raise it if learned baselines are noisy on your cluster; the default is deliberately wide, because Tier C is the tier where nobody asked to be watched. Must be > 0.")
 
 	// Compute-class source knobs (leeway design §7.7). ADDITIVE flags;
 	// only meaningful with --sources=…,compute-class.
@@ -345,12 +352,12 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	// migration grace and the 30d unused-tier dwell — because raising
 	// any of them only ever withholds a finding, which is what the two
 	// share knobs and the dwell already do more legibly.
-	fs.BoolVar(&f.computeClassInfer, "compute-class-infer", true, "Cross-check GKE's ccc_priority_index node annotation by independently matching each node against its compute class's priority rules, and count every disagreement (lookout_leeway_preference_disagreement). The annotation ALWAYS wins either way — this is a check on k8s-lookout's model of the rules, not an override of GKE's answer — so the only thing turning it off buys is silence on a cluster where the matcher is known to be behind the rules people write. Turning it off also blinds the unmatched and ambiguous counters, which are how that gap is meant to become visible.")
-	fs.DurationVar(&f.computeClassWindow, "compute-class-window", computeclass.DefaultWindow, "How much recent history a compute class's rank shares are a share of (§7.7.4). The counters are cumulative, so a share has to be taken over a bounded window or a bad week in March goes on reporting in June. Longer smooths a class whose capacity comes and goes; shorter notices a fallback sooner and reads a rolling estate replacement as one. Composes with --compute-class-dwell rather than duplicating it: the window decides whether the condition is true now, the dwell decides whether it has been true long enough to say. Must be > 0.")
-	fs.DurationVar(&f.computeClassDwell, "compute-class-dwell", leeway.DefaultDwell().For, "How long a compute class's rank verdict must persist before the source raises a finding (§8.2). The resolve dwell (30m) and the flap guard are not separately tunable. Must be > 0.")
-	fs.Float64Var(&f.computeClassRank0, "compute-class-rank0-floor", leeway.DefaultRankThresholds().Rank0ShareFloor, "Raise leeway.rank_degraded when less than this fraction of a class's windowed pod-time ran at its most-preferred priority. OFF by default (0), because on a class with three or more priorities the same reading also describes an estate that is merely mixed, and only somebody who knows what their class was for can say which. Set it when the first priority is the one that matters — a reservation, or the only family your licence covers.")
-	fs.Float64Var(&f.computeClassLastRank, "compute-class-last-rank-ceiling", leeway.DefaultRankThresholds().LastRankShareCeiling, "Raise leeway.rank_degraded when more than this fraction of a class's windowed pod-time ran at its LEAST-preferred priority. The default of 0.9 admits only two readings — capacity at every better priority is chronically unavailable, or the priority list is in the wrong order — and both are findings. Pass 0 to turn the rule off, which is the right answer for a class whose last rung is the cheap capacity it was always meant to run on (§7.7.5).")
-	fs.BoolVar(&f.computeClassTierC, "compute-class-tier-c-signals", false, "Put Tier C compute-class findings on the wire (§8.3). There are two. leeway.rank_tier_unused is a whole priority nothing has occupied for thirty days — a dead rung on the ladder, or reserved capacity being paid for and never drawn on. leeway.rank_degraded with reason rank-baseline is a class whose mean achieved rank has risen above its own learned normal (§7.5); it matures after 200 samples and 6h, and without --store it relearns from scratch on every start. Both are exported as metrics by default and not as signals, because an unused priority is frequently the intended configuration and a class doing worse than it usually does is not a promise anybody made. The rank_wedged and rank_no_migration kinds, and rank_degraded's other rules, always signal.")
+	fs.BoolVar(&f.computeClassInfer, "compute-class-infer", true, "Deprecated (use github.com/go-steer/leeway): Cross-check GKE's ccc_priority_index node annotation by independently matching each node against its compute class's priority rules, and count every disagreement (lookout_leeway_preference_disagreement). The annotation ALWAYS wins either way — this is a check on k8s-lookout's model of the rules, not an override of GKE's answer — so the only thing turning it off buys is silence on a cluster where the matcher is known to be behind the rules people write. Turning it off also blinds the unmatched and ambiguous counters, which are how that gap is meant to become visible.")
+	fs.DurationVar(&f.computeClassWindow, "compute-class-window", computeclass.DefaultWindow, "Deprecated (use github.com/go-steer/leeway): How much recent history a compute class's rank shares are a share of (§7.7.4). The counters are cumulative, so a share has to be taken over a bounded window or a bad week in March goes on reporting in June. Longer smooths a class whose capacity comes and goes; shorter notices a fallback sooner and reads a rolling estate replacement as one. Composes with --compute-class-dwell rather than duplicating it: the window decides whether the condition is true now, the dwell decides whether it has been true long enough to say. Must be > 0.")
+	fs.DurationVar(&f.computeClassDwell, "compute-class-dwell", leeway.DefaultDwell().For, "Deprecated (use github.com/go-steer/leeway): How long a compute class's rank verdict must persist before the source raises a finding (§8.2). The resolve dwell (30m) and the flap guard are not separately tunable. Must be > 0.")
+	fs.Float64Var(&f.computeClassRank0, "compute-class-rank0-floor", leeway.DefaultRankThresholds().Rank0ShareFloor, "Deprecated (use github.com/go-steer/leeway): Raise leeway.rank_degraded when less than this fraction of a class's windowed pod-time ran at its most-preferred priority. OFF by default (0), because on a class with three or more priorities the same reading also describes an estate that is merely mixed, and only somebody who knows what their class was for can say which. Set it when the first priority is the one that matters — a reservation, or the only family your licence covers.")
+	fs.Float64Var(&f.computeClassLastRank, "compute-class-last-rank-ceiling", leeway.DefaultRankThresholds().LastRankShareCeiling, "Deprecated (use github.com/go-steer/leeway): Raise leeway.rank_degraded when more than this fraction of a class's windowed pod-time ran at its LEAST-preferred priority. The default of 0.9 admits only two readings — capacity at every better priority is chronically unavailable, or the priority list is in the wrong order — and both are findings. Pass 0 to turn the rule off, which is the right answer for a class whose last rung is the cheap capacity it was always meant to run on (§7.7.5).")
+	fs.BoolVar(&f.computeClassTierC, "compute-class-tier-c-signals", false, "Deprecated (use github.com/go-steer/leeway): Put Tier C compute-class findings on the wire (§8.3). There are two. leeway.rank_tier_unused is a whole priority nothing has occupied for thirty days — a dead rung on the ladder, or reserved capacity being paid for and never drawn on. leeway.rank_degraded with reason rank-baseline is a class whose mean achieved rank has risen above its own learned normal (§7.5); it matures after 200 samples and 6h, and without --store it relearns from scratch on every start. Both are exported as metrics by default and not as signals, because an unused priority is frequently the intended configuration and a class doing worse than it usually does is not a promise anybody made. The rank_wedged and rank_no_migration kinds, and rank_degraded's other rules, always signal.")
 
 	// Quota source knobs (§7.2 row 8, §10.2). ADDITIVE flags; only
 	// meaningful with --sources=…,quota — which is a PER-PROJECT
@@ -1070,6 +1077,45 @@ func topologyKeysFrom(s string) []leeway.TopologyKey {
 // sourceEnabled reports whether --sources names the given source.
 func (f *flags) sourceEnabled(name string) bool {
 	return slices.Contains(splitCSV(f.sources), name)
+}
+
+// isDeprecatedLeewayFlag reports whether a `lookout watch` flag name belongs
+// to the deprecated in-tree leeway subsystem (#842).
+func isDeprecatedLeewayFlag(name string) bool {
+	return strings.HasPrefix(name, "topology-") || strings.HasPrefix(name, "compute-class-")
+}
+
+// deprecationWarning returns a single-line deprecation warning for stderr
+// (docs/cli-stability-policy.md Rule 3; #842) whenever --sources explicitly
+// names topology-drift or compute-class, or whenever any --topology-* or
+// --compute-class-* flag was explicitly passed on argv.
+func (f *flags) deprecationWarning() (string, bool) {
+	var deprecatedSources []string
+	if !f.sourcesAuto() {
+		for _, s := range splitCSV(f.sources) {
+			if (s == topologydrift.Name || s == computeclass.Name) && !slices.Contains(deprecatedSources, s) {
+				deprecatedSources = append(deprecatedSources, s)
+			}
+		}
+	}
+	var deprecatedFlags []string
+	for _, name := range f.setFlags {
+		if isDeprecatedLeewayFlag(name) {
+			deprecatedFlags = append(deprecatedFlags, "--"+name)
+		}
+	}
+	var used []string
+	if len(deprecatedSources) > 0 {
+		used = append(used, "--sources="+strings.Join(deprecatedSources, ","))
+	}
+	used = append(used, deprecatedFlags...)
+	if len(used) == 0 {
+		return "", false
+	}
+	return fmt.Sprintf(
+		"WARNING: deprecated leeway watch configuration (%s): the topology-drift and compute-class sources and --topology-* / --compute-class-* flags are deprecated and will be removed in a future release; migrate to github.com/go-steer/leeway (#842)",
+		strings.Join(used, ", "),
+	), true
 }
 
 // severityFlag is the repeatable --severity flag: each occurrence is

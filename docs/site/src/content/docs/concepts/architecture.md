@@ -79,10 +79,11 @@ thrash and ceiling pinning), `saturation` (slope → ETA forecasts),
 `degradation` (ready-ratio trends), `expiry` (certificate countdowns),
 `capacity` and `quota` (cluster-autoscaler and project-quota seams),
 `ingress` and `gateway` (controller/GCLB and Gateway API path failures),
-`topology-drift` and `compute-class` (placement skew and GKE ComputeClass
-fallback drift), `notifications` (the provider's own upgrade events and
-security bulletins), and `token-burn` (agent spend as a saturation
-dimension). The full flag surface is in
+`notifications` (the provider's own upgrade events and security
+bulletins), and `token-burn` (agent spend as a saturation dimension);
+the in-tree `topology-drift` and `compute-class` placement sources are
+deprecated in favor of [`go-steer/leeway`](https://github.com/go-steer/leeway).
+The full flag surface is in
 [Reference → `lookout watch`](/reference/watch/); every signal kind is
 cataloged in [Reference → Signal kinds](/reference/signal-kinds/).
 

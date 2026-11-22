@@ -176,7 +176,7 @@ func TestWatchScopeNamespace_RoleOnlyStartsSyncsAndStaysInside(t *testing.T) {
 	if want := "k8s-events,rollout,workload,autoscaling,degradation,ingress"; f.sources != want {
 		t.Errorf("auto resolved --sources=%s, want %s", f.sources, want)
 	}
-	for _, name := range []string{"object-state", "saturation", "capacity", "topology-drift"} {
+	for _, name := range []string{"object-state", "saturation", "capacity"} {
 		line := lineWith(logs, "source "+name+": disabled")
 		if line == "" {
 			t.Errorf("no skip line for %s:\n%s", name, logs)

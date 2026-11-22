@@ -3,8 +3,9 @@
 # SOURCE OF TRUTH: deploy-namespaced/clusterrole-watcher-nodes.yaml and
 # clusterrolebinding-watcher-nodes.yaml (#407). The namespace tier's one
 # cluster-wide grant — read access to Nodes and PersistentVolumes — which
-# keeps object-state, saturation, capacity, topology-drift and storm
-# correlation working. rbac.nodes=false drops it: the strictly namespaced
+# keeps object-state, saturation, capacity and storm correlation working
+# (plus explicit --sources=topology-drift during the #842 deprecation
+# window). rbac.nodes=false drops it: the strictly namespaced
 # tier, deploy-namespaced-strict/. The manifest says why each rule exists.
 # ---------------------------------------------------------------------
 apiVersion: rbac.authorization.k8s.io/v1

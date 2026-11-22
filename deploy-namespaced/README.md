@@ -39,27 +39,24 @@ objects (CI diffs them).
 | `object-state`: pod, node, Deployment, EndpointSlice and PDB state | yes | yes | no: needs nodes |
 | `saturation`: CPU and memory forecasts | yes | yes [^disk] | no: lists nodes |
 | `capacity`: pending pods and autoscaler state | yes | yes | no: needs nodes and the `kube-system` Role |
-| `topology-drift`: placement drift across zones and node groups | yes | yes | no: needs nodes and PersistentVolumes |
 | storm correlation: one incident for many failures with one cause | yes | yes | no: the topology graph needs nodes |
 | watchboard reattachment, graph history and `--at` queries | yes | yes | no: they need the storm topology graph |
-| `compute-class`: GKE compute-class rank drift | yes | no [^cc] | no |
 | `expiry`: certificate, token and webhook CA expiry | yes | no: reads cluster-scoped webhook configurations | no |
-| `ClusterLeewayPolicy` overrides (namespaced `LeewayPolicy` always works) | yes | no | no |
 | incident sessions, dedup, routing, the store, recovery | yes | yes | yes |
 | enrichment bundles | full | namespaced parts; storage and ingress classes and cluster roles are reported as skipped | same, and no node details |
 
 [^disk]: The disk dimension also needs `get` on `nodes/proxy`. Without
 it, saturation runs with that one dimension off and says so at startup.
-[^cc]: Add `list`/`watch` on `computeclasses.cloud.google.com` to the
-nodes ClusterRole to bring it back.
 
 At startup, the default `--sources=auto` skips each source a tier cannot
 run and logs one line naming the missing permission. `--storm=auto` turns
 off the same way. If you name a skipped source in an explicit `--sources`
 list, or set `--storm=on`, the sentinel refuses to start instead. That is
 the same rule as for any other missing grant. `quota`, `notifications` and
-`token-burn` are not affected by either tier. They never read the cluster
-and are never auto-enabled.
+`token-burn` never read the cluster and are never auto-enabled; the
+deprecated `topology-drift` and `compute-class` sources (superseded by
+`github.com/go-steer/leeway`, #842) are also excluded from
+`--sources=auto`.
 
 ## Which namespaces it watches
 

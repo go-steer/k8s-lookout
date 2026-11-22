@@ -1,160 +1,66 @@
 ---
-title: The standalone leeway binary
-description: Running the placement subsystem on its own as a metrics-only process — what it is for, what it gives up, and why it must never run alongside lookout watch on the same cluster.
+title: Standalone leeway (deprecated — moved to go-steer/leeway)
+description: Migration notice for k8s-lookout's deprecated in-tree leeway binary and placement-drift watch sources, superseded by github.com/go-steer/leeway.
 sidebar:
   order: 7
 ---
 
-`lookout watch` already runs the placement subsystem. If you are running
-the sentinel, you have topology drift and compute-class ranks already,
-with a store behind them and findings on the wire, and this page is not
-for you.
+:::caution[Deprecated — moved to `github.com/go-steer/leeway`]
+`k8s-lookout`'s in-tree `cmd/leeway` binary, the `topology-drift` and
+`compute-class` watch sources, `--topology-*` / `--compute-class-*`
+flags, and `LeewayPolicy` CRDs are **deprecated**
+([#842](https://github.com/go-steer/k8s-lookout/issues/842)) and
+scheduled for removal after the CLI stability deprecation window. Do not
+deploy `/leeway` from `ghcr.io/go-steer/lookout` or enable
+`topology-drift` / `compute-class` in `lookout watch` on new clusters.
+:::
 
-`leeway` is a second, much smaller binary that runs the same two
-sources — `topology-drift` and `compute-class` — against one cluster and
-exports their metrics. Nothing else: no event watcher, no store, no
-inject path, no read-path commands. It ships in the same image and the
-same release as `lookout`.
+## Migrate to `go-steer/leeway`
 
-The two sources behave identically either way, so everything in [Tuning
-placement findings](/operations/placement/) — the tiers, the flags that
-move them, the cardinality controls and the SLIs that say whether the
-numbers are sound — applies here unchanged.
+Placement skew across topology domains and GKE `ComputeClass` priority-rank
+fallback depth occur while pods are `Running` and `Ready` — they are
+posture checks rather than reactive per-cluster incidents. They now live in
+the standalone [`github.com/go-steer/leeway`](https://github.com/go-steer/leeway)
+repository:
 
-## The constraint
+- **Scheduled or on-demand posture sweeps (`leeway report`):** runs
+  multi-cluster, paged, per-page-trimmed placement and `ComputeClass`
+  priority-rank analysis with zero standing informer memory between runs,
+  zero LLM tokens when clean, and ready-to-apply remediation YAML
+  (`topologySpreadConstraints` patches, `platform_managed` addon guards,
+  `selector_confined` attribution, Hamilton tie-break alignment, and
+  `nodeTaintsPolicy: Honor` defaulting).
+- **Static spec posture in `lookout` (`lookout audit computeclass`):**
+  checks `ComputeClassMissing`, `ComputeClassNoMatchingNodes`,
+  `SpotWithoutFallback`, `UnsatisfiableZoneWithAccelerator`, and
+  `SingleZoneNodePool` (also included in `lookout audit all -A`), backed by
+  `github.com/go-steer/leeway/pkg/leeway`.
+- **Standalone metrics daemon:** if you specifically need resident
+  Prometheus metrics (`/metrics`, `/healthz`, `/readyz`), build and deploy
+  from [`github.com/go-steer/leeway/cmd/leeway`](https://github.com/go-steer/leeway)
+  instead of `k8s-lookout`. Never run two resident Pod-informer processes
+  against the same cluster unless you have budgeted for the second pod
+  cache (see [Sizing & resource footprint](/operations/sizing/)).
 
-**Do not run `leeway` against a cluster that is already running
-`lookout watch`.**
+## What moving from `lookout watch` to `leeway report` trades away
 
-Both processes build a Pod informer. On a large cluster that is the
-single most expensive watch there is, and running two of them doubles
-the apiserver's outbound traffic and the memory held by the caches, in
-exchange for a second copy of numbers you already have. Consolidating
-onto one shared informer is a thing the sentinel went out of its way to
-do; standing a second process next to it undoes that in one step. [Sizing
-a sentinel](/operations/sizing/) is what that second cache costs — the
-pod-cache row applies unchanged here, because it is the same cache.
+Replacing resident `lookout watch` leeway sources with scheduled or
+on-demand `leeway report` runs intentionally trades away four stateful
+watch-only behaviors:
 
-There is no interlock that stops you. Nothing in either binary can see
-the other, and a cluster has no place to record "a sentinel is already
-here". It is a deployment-time decision, which is why it is written
-down here rather than enforced in code.
+1. **Learned per-workload EWMA baselines (`leeway.baseline_breach`)** —
+   one-shot `leeway report` evaluates declared and inferred intent rather
+   than maintaining SQLite history across hours.
+2. **Rollout-oracle suppression** — `leeway report` does not run a live
+   `rollout` informer, so sweeps taken mid-rollout observe point-in-time
+   replica placement directly.
+3. **Stateful breach and resolve dwell** — one-shot sweeps report current
+   breaches immediately without holding 10-minute breach or 30-minute
+   resolve timers in memory/SQLite.
+4. **Closed-loop `kind=resolved` session injects** — posture findings flow
+   through scheduled report diffs rather than per-incident `lookout watch`
+   sessions.
 
-If both are deployed by accident, the symptom is not an error. It is a
-doubled `apiserver_longrunning_requests`, two scrape targets reporting
-almost-but-not-quite the same `lookout_leeway_*` series, and findings
-that appear twice in whatever consumes them. To tell the two targets
-apart, look for `lookout_leeway_standalone_info` — the standalone
-exports it and the sentinel does not.
-
-## What it is for
-
-Three cases, and they are the only three:
-
-**A cluster that does not run lookout.** You want the placement signal
-and you are not ready to adopt the sentinel. The RBAC is small — pods,
-nodes and replicasets, read-only — and the output is a scrape endpoint.
-
-**A metrics-only posture.** The consumer is Grafana and a rotation, not
-an agent. The sentinel's inject path, store and watchboard are all
-things you would be running and not reading.
-
-**Scale and soak work.** Isolating the subsystem under kwok is how its
-cost is measured without the rest of the sentinel in the same RSS
-number. `--exit-after` exists for exactly this: a bounded run that ends
-itself rather than being killed.
-
-## What it gives up
-
-| | `lookout watch` | `leeway` |
-|---|---|---|
-| Findings | signals → inject path, watchboard, sinks | `/metrics` only |
-| Store | dwell timers and baselines survive a restart | in-memory; a restart resets them |
-| Other sources | all of them | these two |
-| Flag surface | the full set | the knobs that change what is watched or what it costs |
-| Multi-cluster | `--clusters-from`, one process, N runners | one cluster per process |
-
-Running store-less is a supported posture, not a degraded one: current
-placement is rebuilt from the informers on every start, so what a
-restart costs is the dwell timers that were part-way through and the
-learned baselines, not correctness. A finding that was real before the
-restart becomes real again one dwell later.
-
-## Running it
-
-In a pod, with the same service account the sentinel would use:
-
-```yaml
-containers:
-  - name: leeway
-    image: ghcr.io/go-steer/lookout:latest
-    # The image entrypoint is `lookout watch`; the standalone is a
-    # second binary in the same image and has to be asked for.
-    command: ["/leeway"]
-    args:
-      - "--in-cluster"
-      - "--cluster-name=prod-eu-west1"
-      - "--metrics-addr=:9090"
-    ports:
-      - name: metrics
-        containerPort: 9090
-    livenessProbe:
-      httpGet: { path: /healthz, port: metrics }
-    readinessProbe:
-      httpGet: { path: /readyz, port: metrics }
-```
-
-Locally, against whatever your kubeconfig points at:
-
-```
-leeway --metrics-addr=127.0.0.1:0 --exit-after=5m
-```
-
-`--metrics-addr` accepts port `0`, which binds a free one and logs
-which; that is how you run it on a machine that is already using 9090.
-
-Set `--cluster-name` whenever more than one of these reports to one
-backend. It becomes the `cluster` label on every series, and without it
-two clusters are indistinguishable in the same query.
-
-## Sources
-
-`--sources` defaults to both. `compute-class` reads a GKE CRD, so on any
-cluster that does not serve it — kind, kwok, anything not GKE — it is
-**skipped with a line on stderr** and the process carries on with
-`topology-drift` alone.
-
-Naming it explicitly means something different. `--sources=compute-class`
-on a cluster without the CRD is a startup failure, because an operator
-who typed it is relying on it, and the likely cause is the wrong
-kubeconfig rather than the wrong cluster. This is the same asymmetry the
-sentinel's `--sources=auto` draws.
-
-## Endpoints
-
-- `/metrics` — the Prometheus endpoint. Everything documented under
-  [Metrics](/reference/metrics/) for these two sources appears here
-  unchanged, plus `lookout_leeway_standalone_info` and
-  `lookout_leeway_standalone_signals_total`.
-- `/healthz` — liveness. Up means the process is not wedged. It
-  deliberately does not consult the sources: a process that cannot reach
-  the apiserver is not helped by being restarted.
-- `/readyz` — readiness. 503 until every source's initial LIST has
-  drained, naming the one that has not. Until then the gauges are an
-  undercount rather than a reading, which is not a state to route a
-  rollout past.
-
-`--otel-exporter=otlp` adds a push reader configured by the standard
-`OTEL_EXPORTER_OTLP_*` environment. It does not turn `/metrics` off —
-the scrape endpoint is unconditional.
-
-## Findings
-
-There is nowhere for a finding to go, so it goes to two places that are
-not the wire: `lookout_leeway_standalone_signals_total`, labelled by
-source, kind and severity, and one line per finding on stderr.
-
-The counter is a rate, not a state. Which subjects are in breach right
-now is what the sources' own gauges say; how often the subsystem decided
-something was worth saying is what this says, and that is the thing no
-gauge can reconstruct.
+See [Tuning placement findings (deprecated)](/operations/placement/) for
+reference documentation on the legacy `--topology-*` and
+`--compute-class-*` flags while existing deployments complete migration.

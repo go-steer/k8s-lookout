@@ -147,10 +147,11 @@ func realMain(args []string, stdout, stderr *os.File) int {
 
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Usage: leeway [flags]\n\n"+
+			"DEPRECATED (#842): superseded by github.com/go-steer/leeway.\n\n"+
 			"Runs the topology-drift and compute-class sources against one cluster and\n"+
 			"exports their metrics. Metrics-only: there is no inject path and no store.\n\n"+
-			"Do not run this against a cluster already running `lookout watch` — both\n"+
-			"build a Pod informer, and the sentinel already does everything this does.\n\nFlags:\n")
+			"Do not run two resident Pod-informer processes against the same cluster\n"+
+			"unless you have budgeted for the second pod cache.\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
 
@@ -185,6 +186,8 @@ func realMain(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintf(stderr, "leeway: unexpected argument %q (this binary takes flags only)\n", fs.Arg(0))
 		return 2
 	}
+
+	fmt.Fprintln(stderr, "leeway: WARNING: k8s-lookout's in-tree leeway binary is deprecated and will be removed in a future release; migrate to github.com/go-steer/leeway (#842)")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

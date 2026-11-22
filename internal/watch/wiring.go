@@ -94,6 +94,9 @@ func realMain(argv []string) error {
 	// Build identity first (#146): a running pod must identify its
 	// build from `kubectl logs` alone — version, commit, build date.
 	log.Printf("%s", version.String("lookout"))
+	if warning, ok := f.deprecationWarning(); ok {
+		log.Print(warning)
+	}
 
 	// OpenTelemetry init (internal/telemetry). Registers the W3C
 	// traceparent propagator globally (so otelhttp-wrapped outbound

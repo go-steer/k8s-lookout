@@ -22,10 +22,9 @@
 #   2. Do continuous posture sweeps and `findings diff` SQLite baseline
 #      transitions stay error-free and bounded under rollout churn?
 #
-# This is §6.6.1's steady-state soak, and it is deliberately
-# `lookout watch` with every source live rather than the standalone
-# `leeway` binary, paired with a resident `lookout mcp` HTTP daemon and
-# periodic `audit all -A | findings diff` sweeps.
+# This is §6.6.1's steady-state soak: `lookout watch --sources=auto`
+# paired with a resident `lookout mcp` HTTP daemon and periodic
+# `audit all -A | findings diff` sweeps.
 #
 # Usage:
 #   examples/kwok/soak            # 2 hours, 4 rollout drivers, watch + mcp + audit/diff

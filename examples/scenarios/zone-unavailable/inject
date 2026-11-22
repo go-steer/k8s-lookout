@@ -36,6 +36,7 @@ fi
 
 leeway_zones
 kubectl uncordon "$target" >/dev/null
+ENABLE_TOPOLOGY_DRIFT=1 sentinel_resync
 await_namespace_settled leeway-zone
 
 echo "▸ deploying zone-hard (DoNotSchedule ×2) + zone-soft (ScheduleAnyway ×4) across both zones"
