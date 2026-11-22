@@ -205,7 +205,7 @@ func runNetpol(ctx context.Context, deps Deps, inv emit.Invocation) (int, error)
 		}
 		namespaces = filteredNS
 
-		filteredP := policies[:0]
+		filteredP := make([]networkingv1.NetworkPolicy, 0, len(policies))
 		for _, p := range policies {
 			if pol.IsSystemNamespace(p.Namespace) {
 				snap.recordSkippedNS(p.Namespace)

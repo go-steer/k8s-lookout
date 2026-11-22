@@ -26,12 +26,15 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/checks/audit"
 	"github.com/go-steer/k8s-lookout/pkg/checks/checktest"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
@@ -115,16 +118,97 @@ func TestAllStampsSubcommandAndRunsExemptionsWhenProvided(t *testing.T) {
 			t.Errorf("missing findings from %q; saw %v\nstdout:\n%s", want, seenChecks, res.Stdout)
 		}
 	}
-	if !strings.Contains(res.Stdout, "checks=7") {
-		t.Errorf("summary should report checks=7 without --exemptions:\n%s", res.Stdout)
+	if !strings.Contains(res.Stdout, "checks=9") {
+		t.Errorf("summary should report checks=9 without --exemptions:\n%s", res.Stdout)
 	}
 
 	withExemptions := checktest.Run(t, cmd, "-A", "--exemptions="+write(t, fixture))
 	if withExemptions.Code != emit.ExitData {
 		t.Fatalf("exit %d, stderr: %s", withExemptions.Code, withExemptions.Stderr)
 	}
-	if !strings.Contains(withExemptions.Stdout, "checks=8") {
-		t.Errorf("summary should report checks=8 with --exemptions:\n%s", withExemptions.Stdout)
+	if !strings.Contains(withExemptions.Stdout, "checks=10") {
+		t.Errorf("summary should report checks=10 with --exemptions:\n%s", withExemptions.Stdout)
+	}
+}
+
+func TestAllRunsEveryNonMetaAuditDetector(t *testing.T) {
+	meta := map[string]bool{
+		"audit all":        true,
+		"audit exemptions": true,
+		"audit policy":     true,
+	}
+	var wantDetectors []string
+	for _, c := range checks.Default().GroupCommands("audit") {
+		if meta[c.Name] {
+			continue
+		}
+		wantDetectors = append(wantDetectors, c.Name)
+	}
+	if len(wantDetectors) == 0 {
+		t.Fatal("expected non-meta commands in audit group")
+	}
+
+	aiContainer := container("vllm", false, false)
+	aiContainer.Image = "vllm/vllm-openai:latest"
+	aiTpl := template(lbl("vllm"), aiContainer)
+	aiTpl.Spec.NodeSelector = map[string]string{
+		"cloud.google.com/compute-class": "missing-cc",
+	}
+
+	clusterAdmin := clusterRole("cluster-admin", map[string]string{"kubernetes.io/bootstrapping": "rbac-defaults"}, fullWildcard())
+	binding := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "danger-binding"},
+		RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: "cluster-admin"},
+		Subjects:   []rbacv1.Subject{{Kind: "User", Name: "bob@example.com"}},
+	}
+
+	deps := testDepsWithComputeClasses(
+		[]*unstructured.Unstructured{
+			makeComputeClassCR("existing-cc", []map[string]any{{"machineFamily": "n2", "spot": false}}, false),
+		},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "prod"}},
+		deploy("prod", "vllm", 1, aiTpl),
+		svc("prod", "vllm", lbl("vllm"), port("http", 8000, "http")),
+		clusterAdmin,
+		binding,
+	)
+
+	cmd := audit.AllCommand(deps)
+	res := checktest.Run(t, cmd, "-A")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if err := checktest.Verify(cmd, res.Stdout, emit.FormatLogfmt); err != nil {
+		t.Fatalf("contract: %v\n%s", err, res.Stdout)
+	}
+
+	wantChecksNote := fmt.Sprintf("checks=%d", len(wantDetectors))
+	if !strings.Contains(res.Stdout, wantChecksNote) {
+		t.Errorf("summary missing %s:\n%s", wantChecksNote, res.Stdout)
+	}
+
+	seenChecks := map[string]bool{}
+	sawComputeClassMissing := false
+	sawAIExposure := false
+	for _, r := range findingLines(t, res.Stdout) {
+		seenChecks[r["check"]] = true
+		if r["check"] == "audit computeclass" && r["kind"] == "audit.compute_class_posture" && r["reason"] == "ComputeClassMissing" {
+			sawComputeClassMissing = true
+		}
+		if r["check"] == "audit ai" && r["kind"] == "audit.ai_workload_exposure" {
+			sawAIExposure = true
+		}
+	}
+	for _, want := range wantDetectors {
+		if !seenChecks[want] {
+			t.Errorf("detector %q did not emit findings during audit all; saw %v\nstdout:\n%s", want, seenChecks, res.Stdout)
+		}
+	}
+	if !sawComputeClassMissing {
+		t.Errorf("expected audit computeclass to run with caller Deps and emit ComputeClassMissing:\n%s", res.Stdout)
+	}
+	if !sawAIExposure {
+		t.Errorf("expected audit ai to run and emit audit.ai_workload_exposure:\n%s", res.Stdout)
 	}
 }
 
@@ -135,6 +219,30 @@ func TestAllScopeValidation(t *testing.T) {
 	}
 	if res := checktest.Run(t, cmd, "--workload=Deployment/prod/api"); res.Code != emit.ExitUsage {
 		t.Errorf("--workload: exit %d, want %d", res.Code, emit.ExitUsage)
+	}
+}
+
+func TestAllSkipSystemNamespacesHonoredAcrossStages(t *testing.T) {
+	aiContainer := container("vllm", false, false)
+	aiContainer.Image = "vllm/vllm-openai:latest"
+	aiTpl := template(lbl("vllm"), aiContainer)
+	aiTpl.Spec.HostNetwork = true
+
+	cmd := audit.AllCommand(testDeps(
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kube-system"}},
+		deploy("kube-system", "vllm", 1, aiTpl),
+	))
+	res := checktest.Run(t, cmd, "--namespace=kube-system", "--skip-system-namespaces")
+	if res.Code != emit.ExitData {
+		t.Fatalf("exit %d, stderr: %s", res.Code, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "skipped_system_namespaces=1") {
+		t.Errorf("expected skipped_system_namespaces=1:\n%s", res.Stdout)
+	}
+	for _, r := range findingLines(t, res.Stdout) {
+		if r["namespace"] == "kube-system" {
+			t.Errorf("expected zero findings in skipped system namespace kube-system, got: %v", r)
+		}
 	}
 }
 

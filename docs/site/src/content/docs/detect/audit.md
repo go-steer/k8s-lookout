@@ -57,7 +57,7 @@ Inference-workload security and scheduling posture across workload templates: se
 
 ## [`lookout audit all`](/reference/audit-all/)
 
-Run every posture detector in one pass over a shared cluster snapshot: workload availability and rollout safety (`audit workloads`), container and Pod Security hardening (`audit hardening`), RBAC over-permission (`audit rbac`), NetworkPolicy coverage (`audit netpol`), provider cluster configuration (`audit cluster`) and upgrade readiness (`audit upgrades`), plus exemption hygiene (`audit exemptions`) when --exemptions is given. Shared Kubernetes resources are listed at most once across all detectors; each finding carries check=\<subcommand>. Scope with --namespace or -A.
+Run every posture detector in one pass over a shared cluster snapshot: workload availability and rollout safety (`audit workloads`), container and Pod Security hardening (`audit hardening`), RBAC over-permission (`audit rbac`), NetworkPolicy coverage (`audit netpol`), namespace onboarding and quota hygiene (`audit namespaces`), provider cluster configuration (`audit cluster`), upgrade readiness (`audit upgrades`), ComputeClass and zone placement (`audit computeclass`), and AI workload exposure (`audit ai`), plus exemption hygiene (`audit exemptions`) when --exemptions is given. Shared Kubernetes resources are listed at most once across all detectors; each finding carries check=\<subcommand>. Scope with --namespace or -A.
 
 | Kind | Severity | What it means |
 | --- | --- | --- |
@@ -116,11 +116,11 @@ Run every posture detector in one pass over a shared cluster snapshot: workload 
 | `audit.upgrade_blocked` | critical, warning, info | an active maintenance exclusion, a node image on the removed Docker runtime, a removed API in use, a fail-closed upgrade-path webhook, or a zero-disruption PDB will stop or stall the upgrade when it comes |
 | `audit.deprecated_api_in_use` | critical, warning | a cluster resource was last applied with a Kubernetes API version that is deprecated or removed in the target minor release |
 | `audit.upgrade_unattended` | info | upgrades will happen with nobody watching: no maintenance window, or no upgrade notifications |
-| `audit.exemption_expired` | warning | an exemption entry has lapsed: the findings it used to annotate are being reported unqualified again |
-| `audit.exemption_expiring` | info | an exemption entry lapses within --within — renew it or let it go deliberately |
 | `audit.compute_class_posture` | warning, info | a workload's GKE ComputeClass or hardware-placement spec has no fallback or cannot be satisfied by the cluster: references a non-existent ComputeClass, requests a class or accelerator with zero matching nodes and no node-pool auto-creation, pins multi-replica pods directly to Spot without a ComputeClass priority fallback chain, or pins an accelerator workload to a zone with zero matching accelerator nodes while other zones have them |
 | `audit.single_zone_nodepool` | warning, info | a multi-node pool has all of its nodes in a single availability zone while the cluster spans multiple zones, or a workload with zone topologySpreadConstraints is pinned to a single-zone node pool |
 | `audit.ai_workload_exposure` | warning, info | an AI/inference workload has an unisolated serving Service, hostNetwork with accelerators, a hostPath model-cache mount, an automounted default ServiceAccount token, or an unpinned model-loader/inference container image |
+| `audit.exemption_expired` | warning | an exemption entry has lapsed: the findings it used to annotate are being reported unqualified again |
+| `audit.exemption_expiring` | info | an exemption entry lapses within --within — renew it or let it go deliberately |
 
 ## [`lookout audit cluster`](/reference/audit-cluster/)
 
