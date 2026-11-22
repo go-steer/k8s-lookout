@@ -267,7 +267,7 @@ func runRBAC(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		objs.templates = templates
 	}
 	if skipSys {
-		filteredRB := objs.roleBindings[:0]
+		filteredRB := make([]rbacv1.RoleBinding, 0, len(objs.roleBindings))
 		for _, b := range objs.roleBindings {
 			if pol.IsSystemNamespace(b.Namespace) {
 				snap.recordSkippedNS(b.Namespace)
@@ -277,7 +277,7 @@ func runRBAC(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		}
 		objs.roleBindings = filteredRB
 
-		filteredR := objs.roles[:0]
+		filteredR := make([]rbacv1.Role, 0, len(objs.roles))
 		for _, r := range objs.roles {
 			if pol.IsSystemNamespace(r.Namespace) {
 				snap.recordSkippedNS(r.Namespace)
@@ -287,7 +287,7 @@ func runRBAC(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		}
 		objs.roles = filteredR
 
-		filteredCRB := objs.clusterRoleBindings[:0]
+		filteredCRB := make([]rbacv1.ClusterRoleBinding, 0, len(objs.clusterRoleBindings))
 		for _, b := range objs.clusterRoleBindings {
 			if len(b.Subjects) > 0 {
 				allSys := true

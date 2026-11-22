@@ -489,6 +489,7 @@ var viewUnread = map[string][]string{
 		"nodes",
 		"rolebindings.rbac.authorization.k8s.io", "roles.rbac.authorization.k8s.io",
 		"clusterrolebindings.rbac.authorization.k8s.io", "clusterroles.rbac.authorization.k8s.io",
+		"nodes",
 	},
 	"audit rbac -A": {
 		"rolebindings.rbac.authorization.k8s.io", "roles.rbac.authorization.k8s.io",

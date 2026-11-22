@@ -179,7 +179,7 @@ func runAI(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 		templates = matched
 	}
 
-	if skipSys && inv.Scope.Workload.IsZero() && inv.Scope.Namespace == "" {
+	if skipSys && inv.Scope.Workload.IsZero() {
 		filtered := templates[:0]
 		for _, t := range templates {
 			if pol.IsSystemNamespace(t.namespace) {
@@ -280,7 +280,7 @@ func runAI(ctx context.Context, deps Deps, inv emit.Invocation) (int, error) {
 	if err := inv.Out.Note("ai_workloads", itoa(aiCount)); err != nil {
 		return len(templates), err
 	}
-	if skipSys && inv.Scope.Workload.IsZero() && inv.Scope.Namespace == "" {
+	if skipSys && inv.Scope.Workload.IsZero() {
 		if err := inv.Out.Note("skipped_system_namespaces", itoa(snap.skippedNSCount())); err != nil {
 			return len(templates), err
 		}

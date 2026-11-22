@@ -38,7 +38,7 @@ func AllCommand(deps Deps) checks.Command {
 		MCPName:        "k8s_audit_all",
 		MCPProfiles:    []string{"audit"},
 		TimeoutDefault: 60 * time.Second,
-		Summary:        "Run every posture detector in one pass over a shared cluster snapshot: workload availability and rollout safety (`audit workloads`), container and Pod Security hardening (`audit hardening`), RBAC over-permission (`audit rbac`), NetworkPolicy coverage (`audit netpol`), provider cluster configuration (`audit cluster`) and upgrade readiness (`audit upgrades`), plus exemption hygiene (`audit exemptions`) when --exemptions is given. Shared Kubernetes resources are listed at most once across all detectors; each finding carries check=<subcommand>. Scope with --namespace or -A.",
+		Summary:        "Run every posture detector in one pass over a shared cluster snapshot: workload availability and rollout safety (`audit workloads`), container and Pod Security hardening (`audit hardening`), RBAC over-permission (`audit rbac`), NetworkPolicy coverage (`audit netpol`), namespace onboarding and quota hygiene (`audit namespaces`), provider cluster configuration (`audit cluster`), upgrade readiness (`audit upgrades`), ComputeClass and zone placement (`audit computeclass`), and AI workload exposure (`audit ai`), plus exemption hygiene (`audit exemptions`) when --exemptions is given. Shared Kubernetes resources are listed at most once across all detectors; each finding carries check=<subcommand>. Scope with --namespace or -A.",
 		Flags: append([]emit.FlagSpec{
 			skipSystemNamespacesFlag(),
 			perWorkloadFlag(),
@@ -65,16 +65,16 @@ func composedCommands(deps Deps, includeExemptions bool) []checks.Command {
 		NamespacesCommand(deps),
 		ClusterCommand(deps),
 		UpgradesCommand(deps),
+		ComputeClassCommand(deps),
+		AICommand(deps),
 	}
 	if includeExemptions {
 		cmds = append(cmds, ExemptionsCommand())
 	}
 	seen := map[string]bool{
-		"audit ai":           true,
-		"audit all":          true,
-		"audit computeclass": true,
-		"audit exemptions":   true,
-		"audit policy":       true,
+		"audit all":        true,
+		"audit exemptions": true,
+		"audit policy":     true,
 	}
 	for _, c := range cmds {
 		seen[c.Name] = true
@@ -101,7 +101,7 @@ func allKinds(deps Deps) []checks.KindField {
 		scan.KindCheckSkipped: true,
 		scan.KindCheckFailed:  true,
 	}
-	for _, c := range append(composedCommands(deps, true), ComputeClassCommand(deps), AICommand(deps)) {
+	for _, c := range composedCommands(deps, true) {
 		for _, k := range c.Kinds {
 			if seen[k.Name] {
 				continue
@@ -122,7 +122,7 @@ func allOutput(deps Deps) []checks.OutputField {
 		"check":  true,
 		"checks": true,
 	}
-	for _, c := range append(composedCommands(deps, true), ComputeClassCommand(deps), AICommand(deps)) {
+	for _, c := range composedCommands(deps, true) {
 		for _, f := range c.Output {
 			if seen[f.Name] {
 				continue
