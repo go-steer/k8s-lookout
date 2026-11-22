@@ -29,9 +29,11 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/go-steer/k8s-lookout/pkg/sources"
+	"github.com/go-steer/k8s-lookout/pkg/sources/computeclass"
 	"github.com/go-steer/k8s-lookout/pkg/sources/notifications"
 	"github.com/go-steer/k8s-lookout/pkg/sources/quota"
 	"github.com/go-steer/k8s-lookout/pkg/sources/tokenburn"
+	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 )
 
 // grantReviewer is a fake SSAR reviewer driven by a predicate:
@@ -70,14 +72,11 @@ func metricsAbsent() error  { return errors.New("the server could not find the r
 func gatewayServed() bool { return true }
 func gatewayAbsent() bool { return false }
 
-func computeClassServed() bool { return true }
-func computeClassAbsent() bool { return false }
-
 // allServed is the "nothing is missing" availability set: every
 // discovery-backed gate answers yes, so a test that is about grants is
 // only about grants.
 func allServed() availabilityChecks {
-	return availabilityChecks{Metrics: metricsPresent, Gateway: gatewayServed, ComputeClass: computeClassServed}
+	return availabilityChecks{Metrics: metricsPresent, Gateway: gatewayServed}
 }
 
 func autoFlags(t *testing.T, args ...string) *flags {
@@ -93,8 +92,8 @@ func autoFlags(t *testing.T, args ...string) *flags {
 }
 
 // TestResolveSourcesAuto_FullGrants: every grant present and the
-// metrics API served → all seven portable sources enabled, quota and
-// token-burn nowhere in sight.
+// metrics API served → all portable reactive sources enabled, explicit-only
+// and deprecated leeway sources nowhere in sight.
 func TestResolveSourcesAuto_FullGrants(t *testing.T) {
 	t.Parallel()
 	f := autoFlags(t)
@@ -105,9 +104,28 @@ func TestResolveSourcesAuto_FullGrants(t *testing.T) {
 	if !slices.Equal(res.enabled, autoSourceNames) {
 		t.Errorf("enabled = %v, want the full portable set %v", res.enabled, autoSourceNames)
 	}
-	for _, off := range []string{"quota", "token-burn"} {
+	for _, off := range []string{"quota", "notifications", "token-burn", "topology-drift", "compute-class"} {
 		if slices.Contains(res.enabled, off) {
 			t.Errorf("%s must never be auto-enabled", off)
+		}
+	}
+}
+
+// The explicit-only trio and the deprecated in-tree leeway sources (#842)
+// must never enter the auto candidate set or autoCandidateAccess:
+// enabling the first three is a deployment decision (project tier, an
+// operator-created subscription, the paid cost stack), and the leeway pair
+// are slow-moving posture checks superseded by github.com/go-steer/leeway.
+func TestAutoCandidatesExcludeExplicitOnlySources(t *testing.T) {
+	t.Parallel()
+	f := autoFlags(t)
+	access := autoCandidateAccess(f, fake.NewSimpleClientset())
+	for _, name := range []string{quota.Name, notifications.Name, tokenburn.Name, topologydrift.Name, computeclass.Name} {
+		if slices.Contains(autoSourceNames, name) {
+			t.Errorf("source %q is an auto candidate; it must stay excluded from --sources=auto", name)
+		}
+		if _, ok := access[name]; ok {
+			t.Errorf("source %q is still probed in autoCandidateAccess; it must not be probed under --sources=auto", name)
 		}
 	}
 }
@@ -118,18 +136,6 @@ func TestResolveSourcesAuto_FullGrants(t *testing.T) {
 // silence), in §7.2 order, in this exact shape. Operators grep these
 // lines and the troubleshooting page quotes them; change them
 // deliberately or not at all.
-// The explicit-only trio must never enter the auto candidate set:
-// enabling them is a deployment decision (project tier, an
-// operator-created subscription, the paid cost stack), not a
-// probeable cluster capability.
-func TestAutoCandidatesExcludeExplicitOnlySources(t *testing.T) {
-	for _, name := range []string{quota.Name, notifications.Name, tokenburn.Name} {
-		if slices.Contains(autoSourceNames, name) {
-			t.Errorf("source %q is an auto candidate; it must stay explicit-only", name)
-		}
-	}
-}
-
 func TestResolveSourcesAuto_SummaryBlockStable(t *testing.T) {
 	t.Parallel()
 	f := autoFlags(t)
@@ -150,9 +156,7 @@ func TestResolveSourcesAuto_SummaryBlockStable(t *testing.T) {
 		"source capacity: enabled",
 		"source ingress: enabled",
 		"source gateway: enabled",
-		"source topology-drift: enabled",
-		"source compute-class: enabled",
-		"sources: auto resolved → k8s-events,object-state,rollout,workload,autoscaling,saturation,degradation,expiry,capacity,ingress,gateway,topology-drift,compute-class (quota, notifications, and token-burn stay explicit-only: project tier, the notification subscription, and the core-agent cost stack)",
+		"sources: auto resolved → k8s-events,object-state,rollout,workload,autoscaling,saturation,degradation,expiry,capacity,ingress,gateway (quota, notifications, and token-burn stay explicit-only: project tier, the notification subscription, and the core-agent cost stack)",
 	}
 	if !slices.Equal(res.lines, want) {
 		t.Errorf("summary block drifted:\n got: %q\nwant: %q", res.lines, want)
@@ -213,11 +217,11 @@ func TestResolveSourcesAuto_NamespaceTier(t *testing.T) {
 func TestResolveSourcesAuto_MetricsAPIAbsent(t *testing.T) {
 	t.Parallel()
 	f := autoFlags(t)
-	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), allowAll(), availabilityChecks{Metrics: metricsAbsent, Gateway: gatewayServed, ComputeClass: computeClassServed})
+	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), allowAll(), availabilityChecks{Metrics: metricsAbsent, Gateway: gatewayServed})
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
-	want := []string{"k8s-events", "object-state", "rollout", "workload", "autoscaling", "degradation", "expiry", "capacity", "ingress", "gateway", "topology-drift", "compute-class"}
+	want := []string{"k8s-events", "object-state", "rollout", "workload", "autoscaling", "degradation", "expiry", "capacity", "ingress", "gateway"}
 	if !slices.Equal(res.enabled, want) {
 		t.Errorf("enabled = %v, want %v (saturation off)", res.enabled, want)
 	}
@@ -235,7 +239,7 @@ func TestResolveSourcesAuto_MetricsAPIAbsent(t *testing.T) {
 func TestResolveSourcesAuto_GatewayAPIAbsent(t *testing.T) {
 	t.Parallel()
 	f := autoFlags(t)
-	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), allowAll(), availabilityChecks{Metrics: metricsPresent, Gateway: gatewayAbsent, ComputeClass: computeClassServed})
+	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), allowAll(), availabilityChecks{Metrics: metricsPresent, Gateway: gatewayAbsent})
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
@@ -248,28 +252,32 @@ func TestResolveSourcesAuto_GatewayAPIAbsent(t *testing.T) {
 	}
 }
 
-// TestResolveSourcesAuto_ComputeClassesAbsent: RBAC all green but no
-// cloud.google.com/v1 ComputeClasses → compute-class (and only it)
-// skips. Same shape as the gateway gate and for the same reason: a
-// grant naming an absent API group always "allows", so on every non-GKE
-// cluster the probe is green and the discovery check is the only thing
-// standing between the operator and a source with nothing to watch.
-func TestResolveSourcesAuto_ComputeClassesAbsent(t *testing.T) {
+// TestResolveSourcesAuto_ExcludesDeprecatedLeewaySources (#842): even when
+// every RBAC grant is present and GKE's cloud.google.com/v1 ComputeClasses
+// CRD is served in discovery, --sources=auto never enables or probes
+// topology-drift or compute-class.
+func TestResolveSourcesAuto_ExcludesDeprecatedLeewaySources(t *testing.T) {
 	t.Parallel()
+	client := fake.NewSimpleClientset()
+	client.Resources = []*metav1.APIResourceList{
+		{GroupVersion: metricsAPIGroupVersion},
+		{GroupVersion: "gateway.networking.k8s.io/v1", APIResources: []metav1.APIResource{{Name: "gateways"}, {Name: "httproutes"}}},
+		{GroupVersion: "cloud.google.com/v1", APIResources: []metav1.APIResource{{Name: "computeclasses"}}},
+	}
 	f := autoFlags(t)
-	res, err := resolveSourcesAuto(context.Background(), f, fake.NewSimpleClientset(), allowAll(), availabilityChecks{Metrics: metricsPresent, Gateway: gatewayServed, ComputeClass: computeClassAbsent})
+	res, err := resolveSourcesAuto(context.Background(), f, client, allowAll(), allServed())
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
-	if slices.Contains(res.enabled, "compute-class") {
-		t.Errorf("compute-class must not enable without the ComputeClass CRD; enabled = %v", res.enabled)
-	}
-	if !slices.Contains(res.enabled, "gateway") {
-		t.Errorf("only compute-class should have been gated off; enabled = %v", res.enabled)
-	}
-	line := "source compute-class: disabled (cloud.google.com/v1 ComputeClasses not served — this is a GKE feature; enable custom compute classes, or name compute-class in --sources to make this fatal)"
-	if !slices.Contains(res.lines, line) {
-		t.Errorf("missing the exact compute-class skip line %q in:\n%s", line, strings.Join(res.lines, "\n"))
+	for _, deprecated := range []string{topologydrift.Name, computeclass.Name} {
+		if slices.Contains(res.enabled, deprecated) {
+			t.Errorf("%s must not be enabled under --sources=auto; enabled = %v", deprecated, res.enabled)
+		}
+		for _, line := range res.lines {
+			if strings.Contains(line, deprecated) {
+				t.Errorf("startup summary should not probe or report deprecated source %s, got line: %q", deprecated, line)
+			}
+		}
 	}
 }
 
@@ -441,7 +449,7 @@ func TestResolveAutoDefaults_EndToEnd(t *testing.T) {
 	if err := resolveAutoDefaults(context.Background(), f, client); err != nil {
 		t.Fatalf("resolveAutoDefaults: %v", err)
 	}
-	if want := "k8s-events,object-state,rollout,workload,autoscaling,degradation,expiry,capacity,ingress,topology-drift"; f.sources != want {
+	if want := "k8s-events,object-state,rollout,workload,autoscaling,degradation,expiry,capacity,ingress"; f.sources != want {
 		t.Errorf("resolved sources = %q, want %q (no metrics API in fake discovery)", f.sources, want)
 	}
 	if f.storm != stormOn {

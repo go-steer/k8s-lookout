@@ -407,7 +407,14 @@ Watch-path engines at `4,000` nodes / `200,500` S8-padded pods:
 - **`lookout watch --dry-run --sources=auto`:** `/readyz` in **`43.8s`** (`7.6×` faster than before the `pkg/graph` hub-edge fix), **`6,772.5 MiB`** (`6.61 GiB`) peak `VmHWM` / `VmRSS`, **`5,587.3 MiB`** Go heap in use.
 - **`leeway-scale`:** **`28.80 KiB/pod`** marginal resident (`22.86 KiB/pod` Go heap, `57.9 MiB` intercept; `1M`-pod linear extrapolation = `27.52 GiB`), `/readyz` in **`40.7s`** (**`5,697.1 MiB`** quiet peak RSS, `0.001 core`, `p99 = 25.0 ms`); under `24` rollout drivers (**`1,578.5` pod lifecycles/s** = `3.16×` the `500/s` design target), **`1,893.4` watch events/s** (`#491`: `81.2%` applied, `18.8%` inert, `1.02` pod events/lifecycle, `79.7` events folded per evaluation), **`23.76` evaluations/s** (`p99 <= 100.0 ms`), **`1.3840 core`** whole-process (`0.5871 core` evaluator + `0.7969 core` ingest/GC), and `0` counter mismatches.
 
-## leeway-scale
+## leeway-scale (deprecated — #842)
+
+> **Deprecated (#842):** In-tree `cmd/leeway` and the `topology-drift` /
+> `compute-class` watch sources are deprecated in favor of standalone
+> [`github.com/go-steer/leeway`](https://github.com/go-steer/leeway).
+> `examples/kwok/leeway-scale` remains in-tree during the Phase 1
+> deprecation window solely to keep `.github/workflows/scale-kwok.yml`
+> exercising the code until Phase 2 removes it.
 
 `bench` measures the read path — a command runs, answers and exits.
 `leeway-scale` measures the *watch* path, which is the one

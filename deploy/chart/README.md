@@ -135,7 +135,7 @@ a Role and RoleBinding in each of them instead of the cluster-wide
 ClusterRole and its binding. It also adds `--watch-scope=namespace
 --namespace=<the list>` to the watcher. `rbac.nodes` (on by default)
 keeps one small ClusterRole that can only read nodes and persistent
-volumes, so everything except the expiry and compute-class sources keeps
+volumes, so every auto-enabled source except expiry keeps
 working. `rbac.nodes=false` is the strictly namespaced tier. It has no
 ClusterRole at all, drops the capacity Role, and turns `--storm=on` into
 `--storm=auto`. The two tiers are the same deployments as the

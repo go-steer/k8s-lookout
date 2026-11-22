@@ -31,8 +31,9 @@
 package schema
 
 import (
+	"github.com/go-steer/leeway/pkg/leeway"
+
 	"github.com/go-steer/k8s-lookout/pkg/inject"
-	"github.com/go-steer/k8s-lookout/pkg/leeway"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"

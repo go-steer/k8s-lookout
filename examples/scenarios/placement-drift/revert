@@ -24,3 +24,6 @@ kubectl taint node "${CLUSTER_NAME}-worker2" lookout-examples/leeway-hold:NoSche
 # The zone labels stay: see leeway_zones in lib.sh.
 echo "▸ removing namespace leeway-drift"
 kubectl delete namespace leeway-drift --ignore-not-found --wait=false
+
+echo "▸ restoring sentinel with default reactive sources"
+ENABLE_TOPOLOGY_DRIFT="" sentinel_resync

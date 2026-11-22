@@ -19,10 +19,11 @@
 #
 # This is the documented default for the namespace tier: namespaced Roles
 # for everything namespaced, plus ONE small ClusterRole for reading nodes
-# (and the PersistentVolumes topology-drift needs). With that grant every
-# source keeps working except expiry and compute-class. For a sentinel with
-# no cluster-wide grant at all, use deploy-namespaced-strict/ — thinner;
-# README.md says exactly which sources survive each tier.
+# (and the PersistentVolumes retained for explicit --sources=topology-drift
+# during the #842 deprecation window). With that grant every auto-enabled
+# source keeps working except expiry. For a sentinel with no cluster-wide
+# grant at all, use deploy-namespaced-strict/ — thinner; README.md says
+# exactly which sources survive each tier.
 #
 # To run it in a namespace other than agent-triage, build it from your own
 # kustomization with `namespace: <yours>` — the watched namespace follows

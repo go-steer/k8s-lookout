@@ -25,6 +25,7 @@ target="${CLUSTER_NAME}-worker2"
 hold="lookout-examples/leeway-hold=true:NoSchedule"
 
 leeway_zones
+ENABLE_TOPOLOGY_DRIFT=1 sentinel_resync
 await_namespace_settled leeway-drift
 
 # The hold, NOT a cordon. A cordon empties zone-b of usable nodes,

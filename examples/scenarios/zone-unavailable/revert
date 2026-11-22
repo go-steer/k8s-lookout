@@ -22,3 +22,6 @@ kubectl uncordon "${CLUSTER_NAME}-worker2" >/dev/null
 # is not tunable — far past an e2e budget, so nothing waits for it.
 echo "▸ removing namespace leeway-zone"
 kubectl delete namespace leeway-zone --ignore-not-found --wait=false
+
+echo "▸ restoring sentinel with default reactive sources"
+ENABLE_TOPOLOGY_DRIFT="" sentinel_resync

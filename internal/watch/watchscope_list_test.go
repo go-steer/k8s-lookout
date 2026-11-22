@@ -87,7 +87,7 @@ func TestWatchScopeNamespaces_HybridShardsOneBrain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveAutoDefaults: %v", err)
 	}
-	for _, name := range []string{"object-state", "topology-drift", "saturation", "capacity"} {
+	for _, name := range []string{"object-state", "saturation", "capacity"} {
 		if !strings.Contains(","+f.sources+",", ","+name+",") {
 			t.Errorf("hybrid grant should keep %s; auto resolved %s\n%s", name, f.sources, buf.String())
 		}

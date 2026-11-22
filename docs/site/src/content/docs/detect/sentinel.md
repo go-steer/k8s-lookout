@@ -7,16 +7,18 @@ sidebar:
 
 The sentinel is one process per cluster, and what it watches is the
 set of signal sources that are enabled. Out of the box that is
-`--sources=auto`: at startup the sentinel probes each portable
-source's needs — RBAC grants, plus a metrics API for `saturation`,
-the Gateway API CRDs for `gateway`, and the ComputeClass CRD for
-`compute-class` — and enables everything your
+`--sources=auto`: at startup the sentinel probes each portable reactive
+source's needs — RBAC grants, plus a metrics API for `saturation` and
+the Gateway API CRDs for `gateway` — and enables everything your
 deployment supports, announcing each decision with one startup line.
-Three of the sixteen sources are never auto-enabled and stay
-explicit opt-ins: `quota` (a per-GCP-project deployment decision),
-`notifications` (needs an operator-created Pub/Sub subscription), and
-`token-burn` (a polling loop against the core-agent daemon's cost
-stack).
+Five of the sixteen sources are never auto-enabled: `quota` (a
+per-GCP-project deployment decision), `notifications` (needs an
+operator-created Pub/Sub subscription), `token-burn` (a polling loop
+against the core-agent daemon's cost stack), and the deprecated
+`topology-drift` and `compute-class` sources (superseded by
+[`github.com/go-steer/leeway`](https://github.com/go-steer/leeway);
+still accepted in an explicit `--sources` list with a stderr warning
+during the deprecation window).
 
 ## The coverage map
 
@@ -41,9 +43,9 @@ shipped threshold.
 | The autoscaler failing to deliver nodes | A pod Pending and unschedulable past 5 minutes; a nodegroup that asked the cloud for a node and didn't get one for 3 minutes | `capacity` | **Auto** | a running cluster-autoscaler; GCP provider (`-gke` image) for the structured whys — stockout vs quota vs IP exhaustion |
 | Load balancers that never get programmed (Ingress) | An `ingress-gce` Warning `Sync` ("Error syncing to GCP: …") or `Translate` event on an Ingress; a NEG-controller `AttachFailed`/`SyncNetworkEndpointGroupFailed` on a Service — endpoints never reach the load balancer while the Ingress object looks fine | `ingress` | **Auto** | none (nothing fires on clusters without `ingress-gce`/NEG controllers) |
 | Load balancers that never get programmed (Gateway API) | A Gateway or listener holds `Programmed=False` past the 5-minute grace, with `observedGeneration` caught up and the reason not `Pending`; an HTTPRoute parent holds `Accepted=False`/`ResolvedRefs=False` — the route config never became routable | `gateway` | **Auto** | the Gateway API CRDs served — absent, auto skips the source with one loud line (RBAC alone can't tell, so this is a discovery check) |
-| Workload placement drifting across topology domains | A Deployment that declared a `DoNotSchedule` spread constraint is violating it, sustained past the 10-minute dwell; a workload's replicas pile into one zone and stay there. Scored against a declared constraint, an intent inferred from what the workload does say, or — Tier C, metrics-only unless `--topology-tier-c-signals` — its own learned normal | `topology-drift` | **Auto** | none (pods, nodes and replicasets — grants the sentinel already holds) |
-| A whole topology domain with nothing schedulable left in it | Every node in a zone goes NotReady, is deleted, or is cordoned — the subject is the **domain**, so this is one signal for the cluster and not one per workload that drifted because of it (those are suppressed while the zone is out). The three cases are told apart as the suspected cause: nodes gone is `consolidation`, nodes present and none Ready is `domain_outage`, nodes Ready and none schedulable is `taint_exclusion`. Judged on zone and region by default — `--topology-domain-unavailable-keys`, and an empty value turns it off | `topology-drift` | **Auto** | none (nodes — a grant the sentinel already holds) |
-| Workloads quietly running on a compute class's fallback hardware | A GKE custom compute class is an ordered list of machine shapes; when the first choice has no capacity GKE provisions the next one down, the pod runs, the Deployment stays at full replica count, and nothing anywhere says so. The source resolves each node's preference RANK (which is not the raw `ccc_priority_index` — a class that sets `priorityScore` can rank its list in the opposite order), accumulates pod-seconds per rank, and fires when a class is wedged (Pending pods, `DoNotScaleUp`), running 90% of its time on its least-preferred rank, or not migrating back once preferred capacity returns. A whole priority nothing has occupied for 30 days is Tier C — metrics-only unless `--compute-class-tier-c-signals` | `compute-class` | **Auto** | the `cloud.google.com/v1` ComputeClass CRD served — a GKE feature; absent, auto skips the source with one loud line (RBAC alone can't tell, so this is a discovery check) |
+| Workload placement drifting across topology domains (**deprecated** — use [`go-steer/leeway`](https://github.com/go-steer/leeway)) | A Deployment that declared a `DoNotSchedule` spread constraint is violating it, sustained past the 10-minute dwell; a workload's replicas pile into one zone and stay there. Deprecated in `lookout watch` in favor of scheduled/on-demand `leeway report` sweeps | `topology-drift` | No — deprecated | none (pods, nodes and replicasets — emits a stderr deprecation warning when explicitly named) |
+| A whole topology domain with nothing schedulable left in it (**deprecated** — use [`go-steer/leeway`](https://github.com/go-steer/leeway)) | Every node in a zone goes NotReady, is deleted, or is cordoned — the subject is the **domain**, so this is one signal for the cluster and not one per workload that drifted because of it (those are suppressed while the zone is out). Deprecated in `lookout watch` in favor of `go-steer/leeway` | `topology-drift` | No — deprecated | none (nodes — emits a stderr deprecation warning when explicitly named) |
+| Workloads quietly running on a compute class's fallback hardware (**deprecated** — use [`go-steer/leeway`](https://github.com/go-steer/leeway) and `lookout audit computeclass`) | A GKE custom compute class is an ordered list of machine shapes; when the first choice has no capacity GKE provisions the next one down. Deprecated in `lookout watch` in favor of `leeway report` (and `lookout audit computeclass` for static spec posture) | `compute-class` | No — deprecated | the `cloud.google.com/v1` ComputeClass CRD served — emits a stderr deprecation warning when explicitly named |
 | Cloud quota exhaustion, days out | `CPUS/us-east1` at 98% of limit, exhausted in ~16 h at the current slope — drafted increase request attached | `quota` | No — explicit | GCP provider (`-gke` image); project tier — exactly one sentinel per GCP project enables it |
 | Agent token spend burning out of control | One session's token rate at 4× the cross-session median, sustained two polls; a session budget projected to exhaust inside 30 minutes | `token-burn` | No — explicit | `core-agent` daemon — its cost stack is the data source |
 | The provider's own announcements: upgrades and security bulletins | A control-plane or node-pool upgrade starts (recorded for incident-window correlation); a security bulletin affecting the cluster lands on the watchboard | `notifications` | No — explicit | GKE notificationConfig topic + a Pub/Sub subscription (`--notifications-subscription`) |

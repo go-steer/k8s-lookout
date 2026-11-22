@@ -25,9 +25,8 @@
 #      an explicit --storm=on would refuse to start without them.
 #
 # What that costs, against deploy-namespaced/: object-state, saturation,
-# capacity, topology-drift and storm correlation are skipped at startup,
-# one log line each. deploy-namespaced/README.md has the table for both
-# tiers.
+# capacity and storm correlation are skipped at startup, one log line each.
+# deploy-namespaced/README.md has the table for both tiers.
 #
 # Helm: rbac.scope=namespace with rbac.nodes=false.
 apiVersion: kustomize.config.k8s.io/v1beta1

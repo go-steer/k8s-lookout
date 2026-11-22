@@ -32,7 +32,6 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
-	"github.com/go-steer/k8s-lookout/pkg/sources/computeclass"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/gateway"
@@ -41,7 +40,6 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
 	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
-	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 	"github.com/go-steer/k8s-lookout/pkg/sources/workload"
 )
 
@@ -58,9 +56,14 @@ const (
 )
 
 // autoSourceNames is the auto-resolution candidate set, in §7.2 table
-// order: the portable cluster sources — everything a single-cluster
-// deployment can support with RBAC grants alone (plus metrics-server
-// for saturation). Deliberately NOT candidates:
+// order: the portable reactive cluster sources — everything a
+// single-cluster deployment can support with RBAC grants alone (plus
+// metrics-server for saturation). Deliberately NOT candidates:
+//   - topology-drift, compute-class: deprecated in-tree leeway posture
+//     sources (#842; superseded by github.com/go-steer/leeway). Placement
+//     skew and ComputeClass fallback depth are slow-moving posture checks
+//     over Running/Ready pods rather than reactive incidents; both remain
+//     reachable via explicit --sources=... during the deprecation window.
 //   - quota: project tier (§11) — exactly one sentinel per GCP project
 //     enables it, on a provider-tagged image; that is a deployment
 //     decision, not a probeable cluster capability.
@@ -71,21 +74,16 @@ const (
 //     polling loop against the daemon — enabling it is a cost/topology
 //     decision the operator makes explicitly.
 //
-// gateway and compute-class ARE candidates, but unlike the others their
-// RBAC grants are inert on clusters without the corresponding CRDs (RBAC
-// for an absent group is legal and always "allowed"), so the probe alone
-// would enable them everywhere. Both are gated on a discovery check
-// (availabilityChecks.Gateway, .ComputeClass) instead — the CRD-presence
-// analog of saturation's metrics.k8s.io check. compute-class is GKE-only
-// in practice, which is precisely why it is gated rather than excluded:
-// the gate answers "is this a cluster where the question means anything",
-// and nobody should have to name a provider on the command line to get an
-// answer that discovery already has.
+// gateway IS a candidate, but unlike the others its RBAC grants are
+// inert on clusters without the Gateway API CRDs (RBAC for an absent
+// group is legal and always "allowed"), so the probe alone would enable
+// it everywhere. It is gated on a discovery check
+// (availabilityChecks.Gateway) instead — the CRD-presence analog of
+// saturation's metrics.k8s.io check.
 var autoSourceNames = []string{
 	k8sevents.Name, objectstate.Name, rollout.Name, workload.Name,
 	autoscaling.Name, saturation.Name, degradation.Name, expiry.Name,
-	capacity.Name, ingress.Name, gateway.Name, topologydrift.Name,
-	computeclass.Name,
+	capacity.Name, ingress.Name, gateway.Name,
 }
 
 // metricsAPIGroupVersion is what the saturation availability check
@@ -102,22 +100,17 @@ func autoCandidateAccess(f *flags, client kubernetes.Interface) map[string][]sou
 	expiryCfg := expiry.DefaultConfig()
 	expiryCfg.Namespaces = f.expiryNamespaceList()
 	return map[string][]sources.Requirement{
-		k8sevents.Name:     k8sevents.New(client, 0).RequiredAccess(),
-		objectstate.Name:   objectstate.New(client, objectstate.DefaultConfig()).RequiredAccess(),
-		rollout.Name:       rollout.New(client, rollout.DefaultConfig()).RequiredAccess(),
-		workload.Name:      workload.New(client, workload.DefaultConfig()).RequiredAccess(),
-		autoscaling.Name:   autoscaling.New(client, autoscaling.DefaultConfig()).RequiredAccess(),
-		saturation.Name:    saturation.New(saturation.DefaultConfig(), nil, nil).RequiredAccess(),
-		degradation.Name:   degradation.New(client, degradation.DefaultConfig()).RequiredAccess(),
-		expiry.Name:        expiry.New(client, nil, expiryCfg).RequiredAccess(),
-		capacity.Name:      capacity.New(client, nil, capacity.DefaultConfig()).RequiredAccess(),
-		ingress.Name:       ingress.New(client).RequiredAccess(),
-		gateway.Name:       gateway.New(client, nil, gateway.DefaultConfig()).RequiredAccess(),
-		topologydrift.Name: topologydrift.New(client, topologydrift.Config{}).RequiredAccess(),
-		// Package-level, not a throwaway source: computeclass.New can
-		// fail, and a probe built from a construction whose error was
-		// dropped would probe an empty requirement set — i.e. pass.
-		computeclass.Name: computeclass.RequiredAccess(),
+		k8sevents.Name:   k8sevents.New(client, 0).RequiredAccess(),
+		objectstate.Name: objectstate.New(client, objectstate.DefaultConfig()).RequiredAccess(),
+		rollout.Name:     rollout.New(client, rollout.DefaultConfig()).RequiredAccess(),
+		workload.Name:    workload.New(client, workload.DefaultConfig()).RequiredAccess(),
+		autoscaling.Name: autoscaling.New(client, autoscaling.DefaultConfig()).RequiredAccess(),
+		saturation.Name:  saturation.New(saturation.DefaultConfig(), nil, nil).RequiredAccess(),
+		degradation.Name: degradation.New(client, degradation.DefaultConfig()).RequiredAccess(),
+		expiry.Name:      expiry.New(client, nil, expiryCfg).RequiredAccess(),
+		capacity.Name:    capacity.New(client, nil, capacity.DefaultConfig()).RequiredAccess(),
+		ingress.Name:     ingress.New(client).RequiredAccess(),
+		gateway.Name:     gateway.New(client, nil, gateway.DefaultConfig()).RequiredAccess(),
 	}
 }
 
@@ -150,9 +143,6 @@ type availabilityChecks struct {
 	Metrics func() error
 	// Gateway reports whether the Gateway API CRDs are served.
 	Gateway func() bool
-	// ComputeClass reports whether cloud.google.com/v1 ComputeClasses
-	// are served — GKE with custom compute classes enabled.
-	ComputeClass func() bool
 }
 
 // resolveSourcesAuto resolves --sources=auto: per candidate, run its
@@ -221,8 +211,6 @@ func resolveSourcesAuto(ctx context.Context, f *flags, client kubernetes.Interfa
 			res.lines = append(res.lines, "source saturation: disabled (metrics.k8s.io unavailable — install metrics-server)")
 		case name == gateway.Name && checks.Gateway != nil && !checks.Gateway():
 			res.lines = append(res.lines, "source gateway: disabled (Gateway API CRDs not served — install a GKE Gateway class or the upstream gateway.networking.k8s.io CRDs, or name gateway in --sources to make this fatal)")
-		case name == computeclass.Name && checks.ComputeClass != nil && !checks.ComputeClass():
-			res.lines = append(res.lines, "source compute-class: disabled (cloud.google.com/v1 ComputeClasses not served — this is a GKE feature; enable custom compute classes, or name compute-class in --sources to make this fatal)")
 		case name == k8sevents.Name && len(degraded) == 0:
 			res.enabled = append(res.enabled, name)
 			res.lines = append(res.lines, fmt.Sprintf("source %s: enabled (always on — a sentinel that cannot watch events is misdeployed)", name))
@@ -287,8 +275,7 @@ func resolveAutoDefaults(ctx context.Context, f *flags, client kubernetes.Interf
 				_, derr := client.Discovery().ServerResourcesForGroupVersion(metricsAPIGroupVersion)
 				return derr
 			},
-			Gateway:      func() bool { return gateway.GatewayAPIServed(client) },
-			ComputeClass: func() bool { return computeclass.ComputeClassesServed(client) },
+			Gateway: func() bool { return gateway.GatewayAPIServed(client) },
 		})
 		if err != nil {
 			return err

@@ -256,13 +256,10 @@ rules:
     resources: ["networkpolicies"]
     verbs: ["list", "watch"]
   - apiGroups: [""]
-    # The topology-drift source's FR-8 pin predicate: a pod bound to a
-    # volume that cannot follow it to another zone is drift nobody can
-    # act on, and telling that apart from real imbalance needs the
-    # claim's binding (spec.volumeName) and the volume's
-    # spec.nodeAffinity. Nothing reads a volume's contents — these are
-    # object metadata and a node selector, and a PV holds neither data
-    # nor credentials.
+    # Retained for explicit --sources=topology-drift callers during the #842
+    # deprecation window (superseded by github.com/go-steer/leeway). Reads
+    # claim binding (spec.volumeName) and volume spec.nodeAffinity only —
+    # neither object holds data or credentials.
     resources: ["persistentvolumeclaims", "persistentvolumes"]
     verbs: ["list", "watch"]
   - apiGroups: ["storage.k8s.io"]
@@ -298,17 +295,10 @@ rules:
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["list", "watch"]
-  # ---- LeewayPolicy: optional placement-intent overrides (FR-10) ----
-  # The topology-drift source infers placement intent from the pod, and
-  # these CRDs let an operator declare it instead. Granted here so that
-  # installing deploy/crds/leewaypolicies.yaml is the only step needed;
-  # the grant is harmless on the clusters that never do, since a watch
-  # is only started for a kind discovery reports as served.
-  # Deliberately NOT in the source's RequiredAccess(): §11's check fails
-  # startup on a missing grant, and the source does its whole job with
-  # no policy at all, so declaring it would make an optional override a
-  # cluster-wide prerequisite. Dropping these two rules from your own
-  # copy costs you the CRDs and nothing else.
+  # ---- LeewayPolicy: DEPRECATED optional placement-intent overrides (#842) ----
+  # Retained during the #842 deprecation window for explicit
+  # --sources=topology-drift callers (superseded by github.com/go-steer/leeway).
+  # Inert on clusters without the CRDs; scheduled for removal in #842 Phase 2.
   - apiGroups: ["leeway.lookout.go-steer.io"]
     resources: ["leewaypolicies", "clusterleewaypolicies"]
     verbs: ["list", "watch"]
@@ -389,15 +379,10 @@ rules:
     resources: ["gateways", "httproutes"]
     verbs: ["list", "watch"]
 
-  # GKE custom compute classes (compute-class source, leeway §7.7).
-  # Discovery-gated exactly like the Gateway API rules above and inert
-  # for the same reason, which is why they ship unconditionally rather
-  # than in a GKE-only overlay: a rule naming an absent API group costs
-  # nothing and cannot be forgotten later.
-  #
-  # The source reads the class SPEC — the ordered priority list — to work
-  # out what rank each node is at; the nodes and pods it joins that
-  # against are already granted above. There is nothing to write.
+  # GKE custom compute classes (`lookout audit computeclass`, plus explicit
+  # --sources=compute-class callers during the #842 deprecation window;
+  # live rank drift moved to github.com/go-steer/leeway). Inert on non-GKE
+  # clusters.
   - apiGroups: ["cloud.google.com"]
     resources: ["computeclasses"]
     verbs: ["list", "watch"]
