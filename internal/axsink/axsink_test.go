@@ -88,6 +88,9 @@ func (f *fakeAX) GetTask(ctx context.Context, req *axapi.GetTaskRequest) (*axapi
 	}
 	defer f.mu.Unlock()
 	if t, ok := f.created[req.GetName()]; ok {
+		if ns := t.GetMetadata().GetAtespace(); ns != "" && req.GetAtespace() != ns {
+			return nil, status.Errorf(codes.NotFound, "task %q not found in atespace %q (have %q)", req.GetName(), req.GetAtespace(), ns)
+		}
 		if f.phase != "" {
 			t = proto.Clone(t).(*axapi.Task)
 			t.Status = &axapi.TaskStatus{Phase: f.phase}
@@ -837,5 +840,178 @@ func TestAXSink_CrossClusterTLSAndBearerCredentialsEndToEnd(t *testing.T) {
 	}
 	if len(router.order) != 2 {
 		t.Errorf("router injects=%d, want 2 (open + append)", len(router.order))
+	}
+}
+
+// Unset WatchboardTemplate defaults to Template so existing deployments stamp
+// both per-incident tasks and the cluster's watchboard task identically (#847).
+func TestAXSink_WatchboardTemplateDefaultFallback(t *testing.T) {
+	router := &fakeRouter{}
+	sink, ax := newTestAXSink(t, router)
+	ctx := context.Background()
+
+	if _, err := sink.OpenIncidentKeyed(ctx, crashKey, inject.Payload{UID: "u1", Reason: "CrashLoopBackOff"}); err != nil {
+		t.Fatalf("OpenIncidentKeyed: %v", err)
+	}
+	if _, err := sink.CreateSessionKeyed(ctx, boardKey); err != nil {
+		t.Fatalf("CreateSessionKeyed: %v", err)
+	}
+
+	incTask := sink.taskFor(crashKey)
+	wbTask := sink.taskFor(boardKey)
+	incCreated := ax.created[incTask]
+	wbCreated := ax.created[wbTask]
+	if incCreated == nil || wbCreated == nil {
+		t.Fatalf("expected both %s and %s created, got %v", incTask, wbTask, ax.created)
+	}
+	if wbCreated.GetSpec().GetImage() != incCreated.GetSpec().GetImage() || wbCreated.GetMetadata().GetAtespace() != incCreated.GetMetadata().GetAtespace() {
+		t.Errorf("watchboard task %v did not fall back to incident template %v", wbCreated, incCreated)
+	}
+}
+
+// With WatchboardTemplate configured (#847), watchboard tasks
+// (lookout-wb-<cluster>-<hash8>) are stamped from WatchboardTemplate —
+// including their own image, command, atespace, and idle window — while
+// critical incident and storm tasks continue using Template.
+func TestAXSink_WatchboardTemplateDistinctFromIncidentTemplate(t *testing.T) {
+	router := &fakeRouter{}
+	hs := httptest.NewServer(router)
+	t.Cleanup(hs.Close)
+	client, ax := newFakeAXClient(t)
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	incTmpl := &axapi.Task{
+		Metadata: &axapi.ObjectMeta{Atespace: "triage"},
+		Spec: &axapi.TaskSpec{
+			Image:   "incident-agent@sha256:111",
+			Command: []string{"mast", "--workload=incident"},
+			Http:    &axapi.TaskHTTP{Port: 8484},
+			Idle:    &axapi.TaskIdle{SuspendAfter: "10m"},
+		},
+	}
+	wbTmpl := &axapi.Task{
+		Metadata: &axapi.ObjectMeta{Atespace: "watchboard"},
+		Spec: &axapi.TaskSpec{
+			Image:   "watchboard-agent@sha256:222",
+			Command: []string{"mast", "--workload=watchboard"},
+			Http:    &axapi.TaskHTTP{Port: 8484},
+			Idle:    &axapi.TaskIdle{SuspendAfter: "2m"},
+		},
+	}
+	sink, err := New(Config{
+		Client:             client,
+		Template:           incTmpl,
+		WatchboardTemplate: wbTmpl,
+		RouterURL:          hs.URL,
+		BearerToken:        "tok",
+		Scope:              ScopeIncident,
+		StartTimeout:       5 * time.Second,
+		Now:                func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+
+	// 1. Critical incident and storm tasks stamp from Template.
+	stormKey := inject.IncidentKey{Cluster: "prod", Kind: inject.IncidentKeyStorm, ID: "Node//gke-pool-1-abcd"}
+	incID, err := sink.OpenIncidentKeyed(ctx, crashKey, inject.Payload{Cluster: "prod", UID: "u1", Reason: "CrashLoopBackOff"})
+	if err != nil {
+		t.Fatalf("OpenIncidentKeyed(incident): %v", err)
+	}
+	if _, err := sink.OpenIncidentKeyed(ctx, stormKey, inject.StormPayload{Cluster: "prod", AncestorKind: "Node", AncestorName: "gke-pool-1-abcd"}); err != nil {
+		t.Fatalf("OpenIncidentKeyed(storm): %v", err)
+	}
+	for _, key := range []inject.IncidentKey{crashKey, stormKey} {
+		name := sink.taskFor(key)
+		got := ax.created[name]
+		if got == nil {
+			t.Fatalf("task %s not created", name)
+		}
+		if got.GetSpec().GetImage() != "incident-agent@sha256:111" || got.GetMetadata().GetAtespace() != "triage" {
+			t.Errorf("task %s = %v, want incident template", name, got)
+		}
+	}
+
+	// 2. Watchboard CreateSessionKeyed, rotation, and digest Append stamp from WatchboardTemplate.
+	wb1, err := sink.CreateSessionKeyed(ctx, boardKey)
+	if err != nil {
+		t.Fatalf("CreateSessionKeyed(1): %v", err)
+	}
+	wbTask := sink.taskFor(boardKey)
+	if !strings.HasPrefix(wbTask, "lookout-wb-prod-") {
+		t.Fatalf("wbTask = %q, want lookout-wb-prod-*", wbTask)
+	}
+	wbCreated := ax.created[wbTask]
+	if wbCreated == nil {
+		t.Fatalf("watchboard task %s not created", wbTask)
+	}
+	if wbCreated.GetSpec().GetImage() != "watchboard-agent@sha256:222" ||
+		wbCreated.GetMetadata().GetAtespace() != "watchboard" ||
+		len(wbCreated.GetSpec().GetCommand()) != 2 ||
+		wbCreated.GetSpec().GetCommand()[1] != "--workload=watchboard" {
+		t.Errorf("watchboard task = %v, want watchboard template", wbCreated)
+	}
+	if err := sink.Append(ctx, wb1, inject.WatchboardDigestPayload{Kind: "watchboard.digest", Cluster: "prod", BoardGeneration: 1, Sequence: 1}); err != nil {
+		t.Fatalf("Append(digest): %v", err)
+	}
+	wb2, err := sink.CreateSessionKeyed(ctx, boardKey)
+	if err != nil {
+		t.Fatalf("CreateSessionKeyed(2): %v", err)
+	}
+	if wb2 == wb1 {
+		t.Errorf("rotation reused session %s", wb1)
+	}
+	if msgs := router.injects["watchboard/"+wbTask+" /sessions/attach-1/inject"]; len(msgs) != 1 {
+		t.Errorf("watchboard digest not routed to watchboard/%s: got %v", wbTask, router.injects)
+	}
+
+	// 3. Each task respects its own template's spec.idle.suspendAfter:
+	// after 3m, the watchboard task (2m idle) holds reminders while the
+	// incident task (10m idle) is still busy and delivers directly.
+	now = now.Add(3 * time.Minute)
+	if err := sink.Append(ctx, wb1, inject.Payload{Kind: "k8s-event-followup", Cluster: "prod", UID: "w1", RepeatCount: 1}); err != nil {
+		t.Fatalf("Append(watchboard reminder): %v", err)
+	}
+	if got := sink.heldFor(wbTask); len(got) != 1 {
+		t.Errorf("watchboard reminder at +3m (past 2m idle) not held: %v", got)
+	}
+	if err := sink.Append(ctx, incID, inject.Payload{Kind: "k8s-event-followup", Cluster: "prod", UID: "u1", RepeatCount: 1}); err != nil {
+		t.Fatalf("Append(incident reminder): %v", err)
+	}
+	if got := sink.heldFor(sink.taskFor(crashKey)); len(got) != 0 {
+		t.Errorf("incident reminder at +3m (inside 10m idle) should not be held: %v", got)
+	}
+
+	// 4. Plain OpenIncident with a watchboard payload on another cluster also uses WatchboardTemplate.
+	if _, err := sink.OpenIncident(ctx, inject.WatchboardDigestPayload{Kind: "watchboard.digest", Cluster: "staging"}); err != nil {
+		t.Fatalf("OpenIncident(watchboard): %v", err)
+	}
+	stagingWB := sink.taskFor(inject.IncidentKey{Cluster: "staging", Kind: inject.IncidentKeyWatchboard})
+	if got := ax.created[stagingWB]; got == nil || got.GetSpec().GetImage() != "watchboard-agent@sha256:222" {
+		t.Errorf("staging watchboard task = %v, want watchboard template", got)
+	}
+}
+
+func TestAXSink_WatchboardTemplateValidation(t *testing.T) {
+	client, _ := newFakeAXClient(t)
+	if _, err := New(Config{
+		Client:             client,
+		Template:           testTemplate(),
+		WatchboardTemplate: &axapi.Task{Metadata: &axapi.ObjectMeta{Atespace: "wb"}},
+		RouterURL:          "http://router.test",
+		BearerToken:        "tok",
+	}); err == nil || !strings.Contains(err.Error(), "watchboard task template must have a spec") {
+		t.Errorf("specless WatchboardTemplate err = %v, want spec error", err)
+	}
+	if _, err := New(Config{
+		Client:             client,
+		Template:           testTemplate(),
+		WatchboardTemplate: testTemplate(),
+		RouterURL:          "http://router.test",
+		BearerToken:        "tok",
+		Scope:              ScopeCluster,
+	}); err == nil || !strings.Contains(err.Error(), "only valid with scope") {
+		t.Errorf("ScopeCluster + WatchboardTemplate err = %v, want scope error", err)
 	}
 }

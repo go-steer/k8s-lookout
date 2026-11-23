@@ -13,9 +13,11 @@
 # limitations under the License.
 
 
-# The AX Task every incident runs as (--ax-task-template). The ax sink
-# sets metadata.name per task and changes nothing else; the template is
-# decoded strictly at startup, so a typo fails `lookout watch` at once.
+# The AX Task every incident runs as (--ax-task-template), and the
+# cluster's watchboard task when --ax-watchboard-task-template is unset.
+# The ax sink sets metadata.name per task and changes nothing else;
+# templates are decoded strictly at startup, so a typo fails `lookout
+# watch` at once.
 #
 # Replace the image with your agent's (it must serve core-agent's
 # session API, POST /sessions and /sessions/<sid>/inject, on http.port),
