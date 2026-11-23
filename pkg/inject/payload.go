@@ -453,10 +453,11 @@ const (
 )
 
 // WatchboardEntry is one warning-class signal on a watchboard digest:
-// its kind + fingerprint, the object reference, and the dedup
-// counters. Compact by design — the digest is a board, not an
-// incident record; the agent runs `lookout` reads if an entry needs
-// investigation.
+// its kind + fingerprint, the object reference, the dedup counters,
+// and the sanitized, length-capped signal message (MaxWatchboardMessageBytes).
+// Compact by design — the digest is a board, not a full enriched
+// incident record; the agent has actionable symptom text upfront and
+// runs `lookout` reads if an entry needs deeper investigation.
 type WatchboardEntry struct {
 	Kind         string    `json:"kind"`
 	Fingerprint  string    `json:"fingerprint"`
@@ -472,6 +473,13 @@ type WatchboardEntry struct {
 	// on the same rule as Payload.ReasonClass (issue #574), so a board
 	// reader groups entries without redoing the classification.
 	ReasonClass string `json:"reason_class,omitempty"`
+	// Message is the sanitized, length-capped signal message (issue
+	// #846; capped at MaxWatchboardMessageBytes = 512 UTF-8 bytes on a
+	// rune boundary, inclusive of the "…[truncated]" suffix when cut).
+	// ADDITIVE and LAST per signal-schema v1 §Evolution; omitempty
+	// keeps entries whose signal carried no message byte-identical to
+	// pre-#846.
+	Message string `json:"message,omitempty"`
 }
 
 // WatchboardDigestPayload is the JSON body injected for

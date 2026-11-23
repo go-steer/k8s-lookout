@@ -373,6 +373,65 @@ func TestWatchboardDigestFitTo_UntouchedWhenItFits(t *testing.T) {
 	}
 }
 
+func TestCapWatchboardMessage_BoundsAndRuneSafety(t *testing.T) {
+	if got := CapWatchboardMessage(""); got != "" {
+		t.Errorf("CapWatchboardMessage(\"\") = %q, want empty", got)
+	}
+	exact := strings.Repeat("a", MaxWatchboardMessageBytes)
+	if got := CapWatchboardMessage(exact); got != exact {
+		t.Errorf("exact %d-byte message changed: len=%d", MaxWatchboardMessageBytes, len(got))
+	}
+	over := strings.Repeat("b", MaxWatchboardMessageBytes+1)
+	gotOver := CapWatchboardMessage(over)
+	if len(gotOver) != MaxWatchboardMessageBytes {
+		t.Errorf("len(CapWatchboardMessage(513 ASCII)) = %d, want %d", len(gotOver), MaxWatchboardMessageBytes)
+	}
+	if !strings.HasSuffix(gotOver, truncMarker) {
+		t.Errorf("truncated message missing %q suffix: %q", truncMarker, gotOver)
+	}
+
+	// Multi-byte UTF-8 runes crossing the cut point must never be split mid-rune.
+	for prefixLen := range 4 {
+		in := strings.Repeat("x", prefixLen) + strings.Repeat("界", 250) // 3-byte runes
+		got := CapWatchboardMessage(in)
+		if !utf8.ValidString(got) {
+			t.Errorf("prefix=%d: invalid UTF-8 after cap", prefixLen)
+		}
+		if len(got) > MaxWatchboardMessageBytes {
+			t.Errorf("prefix=%d: len=%d > MaxWatchboardMessageBytes (%d)", prefixLen, len(got), MaxWatchboardMessageBytes)
+		}
+		if !strings.HasSuffix(got, truncMarker) {
+			t.Errorf("prefix=%d: missing %q suffix", prefixLen, truncMarker)
+		}
+	}
+
+	// Invalid UTF-8 bytes are normalized before measuring so output is valid UTF-8 and <= cap.
+	corrupt := strings.Repeat("x", MaxWatchboardMessageBytes-1) + "\xff"
+	gotCorrupt := CapWatchboardMessage(corrupt)
+	if !utf8.ValidString(gotCorrupt) || len(gotCorrupt) > MaxWatchboardMessageBytes {
+		t.Errorf("corrupt UTF-8 cap failed: valid=%v len=%d", utf8.ValidString(gotCorrupt), len(gotCorrupt))
+	}
+
+	// A "[REDACTED]" token straddling byte 498 steps back cleanly instead of slicing "[RED…[truncated]".
+	straddle := strings.Repeat("z", 494) + "[REDACTED]" + strings.Repeat(" tail", 10)
+	gotStraddle := CapWatchboardMessage(straddle)
+	if gotStraddle != strings.Repeat("z", 494)+truncMarker {
+		t.Errorf("straddled [REDACTED] = %q, want step-back before '['", gotStraddle)
+	}
+
+	// Default --watchboard-batch=5 with max-capped messages stays well inside MaxInjectBytes.
+	p := digestWith(5)
+	for i := range p.Entries {
+		p.Entries[i].Message = CapWatchboardMessage(strings.Repeat("m", 2048))
+	}
+	if sz := WireSize(p); sz > MaxInjectBytes {
+		t.Errorf("5 max-capped entries WireSize = %d, want <= %d", sz, MaxInjectBytes)
+	}
+	if shed := p.FitTo(MaxInjectBytes); shed != nil {
+		t.Errorf("5 max-capped entries required FitTo shedding: %v", shed)
+	}
+}
+
 func tail(s string, n int) string {
 	if len(s) <= n {
 		return s

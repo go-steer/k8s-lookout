@@ -157,4 +157,45 @@ func TestMaskingSink_CapabilityTiersAndSanitization(t *testing.T) {
 	if !strings.Contains(string(keyedWire), "v1.2.3") {
 		t.Errorf("OpenIncidentKeyed altered benign annotation value: %s", keyedWire)
 	}
+
+	// Watchboard digest payloads (value and pointer) sanitize entry messages,
+	// enforce the 512-byte cap even when "[REDACTED]" expands a short secret
+	// past 512 bytes, and never mutate the caller's slice.
+	expanding508 := strings.Repeat("y", 484) + " postgres://svc:pw@db:54" // 508B raw -> 516B masked -> capped to <=512B
+	origEntries := []inject.WatchboardEntry{
+		{Kind: "degradation.probe_flap", Name: "web-0", Message: "auth failed: postgres://svc:wbs3cr3t@db.prod.svc:5432/app"},
+		{Kind: "objectstate.restart_burst", Name: "web-1", Message: "3 container restarts within 10m0s"},
+		{Kind: "expiry.warning", Name: "web-2", Message: expanding508},
+	}
+	digestVal := inject.WatchboardDigestPayload{
+		Kind:    inject.KindWatchboardDigest,
+		Cluster: "prod",
+		Entries: origEntries,
+	}
+	if err := wPlain.Append(context.Background(), "wb-1", digestVal); err != nil {
+		t.Fatalf("Append watchboard digest value: %v", err)
+	}
+	wbValWire, _ := json.Marshal(plain.appendedPayload)
+	if strings.Contains(string(wbValWire), "wbs3cr3t") || strings.Contains(string(wbValWire), ":pw@") {
+		t.Errorf("WatchboardDigestPayload value leaked secret on wire: %s", wbValWire)
+	}
+	if !strings.Contains(string(wbValWire), "3 container restarts within 10m0s") {
+		t.Errorf("WatchboardDigestPayload value altered benign message: %s", wbValWire)
+	}
+	maskedDigest := plain.appendedPayload.(inject.WatchboardDigestPayload)
+	if got := maskedDigest.Entries[2].Message; len(got) > inject.MaxWatchboardMessageBytes || !strings.HasSuffix(got, inject.WatchboardTruncMarker) {
+		t.Errorf("expanding secret entry len=%d (%q), want <= %d with %q suffix",
+			len(got), got, inject.MaxWatchboardMessageBytes, inject.WatchboardTruncMarker)
+	}
+	if !strings.Contains(origEntries[0].Message, "wbs3cr3t") {
+		t.Errorf("MaskPayload mutated caller's WatchboardEntry slice in place")
+	}
+
+	if err := wPlain.Append(context.Background(), "wb-1", &digestVal); err != nil {
+		t.Fatalf("Append watchboard digest pointer: %v", err)
+	}
+	wbPtrWire, _ := json.Marshal(plain.appendedPayload)
+	if strings.Contains(string(wbPtrWire), "wbs3cr3t") {
+		t.Errorf("WatchboardDigestPayload pointer leaked secret on wire: %s", wbPtrWire)
+	}
 }

@@ -37,11 +37,14 @@ package watch
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-steer/k8s-lookout/pkg/emit"
+	"github.com/go-steer/k8s-lookout/pkg/inject"
 )
 
 // secretShapeCases are the planted MaskString shapes and the exact
@@ -243,5 +246,126 @@ func TestDispatch_InnocentPayloadPassesThroughByteIdentical(t *testing.T) {
 	}
 	if strings.Contains(wire, emit.Redacted) {
 		t.Errorf("innocent payload contains %s — sanitizer over-masked: %s", emit.Redacted, wire)
+	}
+}
+
+// TestDispatch_WatchboardDigestMessageMasked_Golden enforces the §6.5
+// sanitizer contract and golden fixture pin on WatchboardEntry.Message
+// (#846): every planted credential shape (including a PEM private key
+// straddling the 512-byte cap boundary and inline/header credentials
+// whose [REDACTED] token straddles byte 498 across digestPayload →
+// MaskingSink) must arrive redacted with intact truncation markers on
+// the watchboard digest wire, while innocent warning prose survives.
+func TestDispatch_WatchboardDigestMessageMasked_Golden(t *testing.T) {
+	t.Parallel()
+	base, injects := newRoutingFakeDaemon(t)
+	// Batch all cases + PEM boundary + inline/header 498-byte boundary + innocent control.
+	total := len(secretShapeCases) + 4
+	d, _ := newBoardDispatcher(t, base, total, time.Minute, 200)
+	ctx := context.Background()
+
+	for i, tc := range secretShapeCases {
+		requireMaskedForm(t, tc.planted, tc.masked)
+		sig := warningSignal(i + 1)
+		sig.Message = tc.planted
+		d.DispatchSignal(ctx, sig)
+	}
+
+	// Boundary case 1: a PEM private key whose secret bytes start before
+	// byte 498 while -----END RSA PRIVATE KEY----- falls past byte 512,
+	// followed by enough trailing text that even the post-redaction string
+	// exceeds 512 bytes. Capping before masking would slice off the END
+	// delimiter and leak MIIEpAIBAAKCAQEAWATCHBOARDSECRETBOUNDARYLEAK;
+	// masking first redacts the whole PEM block and then caps to 512 bytes.
+	pemPrefix := strings.Repeat("probe detail ", 32) // 416 bytes
+	pemSecret := "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAWATCHBOARDSECRETBOUNDARYLEAK\n-----END RSA PRIVATE KEY-----"
+	boundaryPlanted := pemPrefix + pemSecret + strings.Repeat(" trailing context", 8)
+	if !strings.Contains(emit.MaskString(boundaryPlanted), emit.Redacted) {
+		t.Fatalf("test fixture bug: MaskString did not redact PEM block")
+	}
+	sigBoundary := warningSignal(len(secretShapeCases) + 1)
+	sigBoundary.Message = boundaryPlanted
+	d.DispatchSignal(ctx, sigBoundary)
+
+	// Boundary case 2: inline password= assignment where [REDACTED]
+	// straddles byte 498 across digestPayload → MaskingSink; must preserve
+	// "…[truncated]" without leaving a partial "[RED" or stray "]".
+	sigInlineCut := warningSignal(len(secretShapeCases) + 2)
+	sigInlineCut.Message = strings.Repeat("x", 484) + " password=hunter2" + strings.Repeat(" tail", 20)
+	d.DispatchSignal(ctx, sigInlineCut)
+
+	// Boundary case 3: Authorization: Bearer header straddling byte 498
+	// across digestPayload → MaskingSink; must preserve "…[truncated]".
+	sigBearerCut := warningSignal(len(secretShapeCases) + 3)
+	sigBearerCut.Message = strings.Repeat("x", 476) + " Authorization: Bearer s3cr3tBearerTok3n" + strings.Repeat(" tail", 20)
+	d.DispatchSignal(ctx, sigBearerCut)
+
+	// Innocent precision control: resource names and digests survive untouched.
+	sigInnocent := warningSignal(len(secretShapeCases) + 4)
+	sigInnocent.Message = "secret edgy-absent-secret not found for image@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+	d.DispatchSignal(ctx, sigInnocent)
+
+	if len(*injects) != 1 {
+		t.Fatalf("watchboard produced %d injects, want 1", len(*injects))
+	}
+	rawWire := messageOf(t, (*injects)[0].Body)
+	for _, needle := range []string{
+		"hunter2",
+		"eyJhbGci",
+		"dXNlcjpodW50ZXIyLXNlY3JldA==",
+		"MIIEpAIBAAKCAQEAWATCHBOARDSECRETBOUNDARYLEAK",
+		"BEGIN RSA PRIVATE KEY",
+		"s3cr3tBearerTok3n",
+		"[REDACTED]]",
+	} {
+		if strings.Contains(rawWire, needle) {
+			t.Fatalf("SECRET LEAK or mangle on watchboard digest wire: %q survived in %s", needle, rawWire)
+		}
+	}
+
+	var digest inject.WatchboardDigestPayload
+	if err := json.Unmarshal([]byte(rawWire), &digest); err != nil {
+		t.Fatalf("unmarshal digest: %v", err)
+	}
+	if len(digest.Entries) != total {
+		t.Fatalf("digest entries = %d, want %d", len(digest.Entries), total)
+	}
+	for i, tc := range secretShapeCases {
+		if got := digest.Entries[i].Message; got != tc.masked {
+			t.Errorf("%s: entry[%d].Message = %q, want %q", tc.name, i, got, tc.masked)
+		}
+	}
+	if got := digest.Entries[len(secretShapeCases)].Message; !strings.Contains(got, emit.Redacted) || len(got) > inject.MaxWatchboardMessageBytes {
+		t.Errorf("boundary PEM entry = %q (len=%d), want %s and len <= %d",
+			got, len(got), emit.Redacted, inject.MaxWatchboardMessageBytes)
+	}
+	for _, idx := range []int{len(secretShapeCases) + 1, len(secretShapeCases) + 2} {
+		got := digest.Entries[idx].Message
+		if !strings.HasSuffix(got, inject.WatchboardTruncMarker) || len(got) > inject.MaxWatchboardMessageBytes {
+			t.Errorf("entry[%d].Message = %q (len=%d), want suffix %q and len <= %d",
+				idx, got, len(got), inject.WatchboardTruncMarker, inject.MaxWatchboardMessageBytes)
+		}
+	}
+	if got := digest.Entries[len(secretShapeCases)+3].Message; got != sigInnocent.Message {
+		t.Errorf("innocent entry over-redacted: got %q, want %q", got, sigInnocent.Message)
+	}
+
+	pretty, err := json.MarshalIndent(digest, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent: %v", err)
+	}
+	gotGolden := string(pretty) + "\n"
+	goldenPath := filepath.Join("testdata", "watchboard_sanitize.golden")
+	if os.Getenv("UPDATE_GOLDEN") == "1" {
+		if err := os.WriteFile(goldenPath, []byte(gotGolden), 0o644); err != nil {
+			t.Fatalf("write %s: %v", goldenPath, err)
+		}
+	}
+	wantBytes, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read %s: %v (run UPDATE_GOLDEN=1 go test ./internal/watch -run TestDispatch_WatchboardDigestMessageMasked_Golden)", goldenPath, err)
+	}
+	if gotGolden != string(wantBytes) {
+		t.Errorf("watchboard sanitized golden drifted from %s:\n got:\n%s\nwant:\n%s", goldenPath, gotGolden, string(wantBytes))
 	}
 }

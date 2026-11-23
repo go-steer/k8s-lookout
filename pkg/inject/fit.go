@@ -17,6 +17,8 @@ package inject
 import (
 	"encoding/json"
 	"slices"
+	"strings"
+	"unicode/utf8"
 )
 
 // MaxInjectBytes is the core-agent daemon's per-inject request-body
@@ -29,10 +31,77 @@ import (
 // empty session (issue #198).
 const MaxInjectBytes = 8192
 
+// MaxWatchboardMessageBytes caps each WatchboardEntry.Message at 512
+// UTF-8 bytes on a rune boundary, inclusive of truncMarker when cut
+// (issue #846). Sources cap Signal.Message at 2048 bytes for single
+// incidents, which would push a default --watchboard-batch=5 digest
+// over MaxInjectBytes (8192); 512 bytes preserves ordinary warning
+// text in full while keeping a full 5-entry batch comfortably inside
+// the 8192-byte digest budget without shedding entries.
+const MaxWatchboardMessageBytes = 512
+
+// WatchboardTruncMarker terminates a shortened message (FitTo and
+// CapWatchboardMessage), exported so watch-side sanitization can keep
+// mask + cap idempotent across repeated passes.
+const WatchboardTruncMarker = truncMarker
+
 // truncMarker terminates a Message that FitTo shortened, so a reader
 // (and the playbook) sees the text was cut rather than genuinely ending
 // there.
 const truncMarker = "…[truncated]"
+
+// CapWatchboardMessage normalizes invalid UTF-8 and caps s to at most
+// MaxWatchboardMessageBytes UTF-8 bytes on a rune boundary without
+// splitting an existing "[REDACTED...]" token, appending
+// WatchboardTruncMarker ("…[truncated]") when shortened.
+func CapWatchboardMessage(s string) string {
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, "\ufffd")
+	}
+	if len(s) <= MaxWatchboardMessageBytes {
+		return s
+	}
+	return capPrefixWithMarker(s)
+}
+
+// CapWatchboardTruncatedPrefix caps an already-truncated message prefix
+// (after its trailing WatchboardTruncMarker was stripped) so re-attaching
+// WatchboardTruncMarker stays <= MaxWatchboardMessageBytes and rune-safe.
+func CapWatchboardTruncatedPrefix(prefix string) string {
+	if !utf8.ValidString(prefix) {
+		prefix = strings.ToValidUTF8(prefix, "\ufffd")
+	}
+	budget := MaxWatchboardMessageBytes - len(truncMarker)
+	if len(prefix) <= budget {
+		return prefix + truncMarker
+	}
+	return capPrefixWithMarker(prefix)
+}
+
+func capPrefixWithMarker(s string) string {
+	budget := MaxWatchboardMessageBytes - len(truncMarker)
+	cut := budget
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	cut = stepBackRedacted(s, cut)
+	return s[:cut] + truncMarker
+}
+
+// stepBackRedacted ensures cut never slices through the middle of a
+// "[REDACTED]" or "[REDACTED:<n>B]" token in s: if one starts before cut
+// and closes at or after cut, cut steps back to its opening '['.
+func stepBackRedacted(s string, cut int) int {
+	lo := max(cut-32, 0)
+	for i := lo; i < cut; i++ {
+		if s[i] == '[' && strings.HasPrefix(s[i:], "[REDACTED") {
+			if closeIdx := strings.IndexByte(s[i:], ']'); closeIdx >= 0 && i+closeIdx >= cut {
+				return i
+			}
+		}
+	}
+	return cut
+}
 
 // WireSize returns the exact number of bytes injectJSON POSTs for
 // payload: the payload marshaled to JSON, wrapped as a string in the

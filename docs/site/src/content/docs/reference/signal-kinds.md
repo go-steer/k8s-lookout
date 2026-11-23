@@ -34,7 +34,7 @@ Emitted by the dispatcher itself (outcome records, storms, watchboard, triage ev
 | `storm.member` | `StormMemberPayload` | Membership record injected into the storm session for each folded incident. |
 | `storm.member_superseded` | `StormMemberPayload` | Supersede pointer left in a pre-storm incident session that the storm absorbed. |
 | `storm.update` | `StormUpdatePayload` | Storm size refresh (latest wins): membership grew past a reporting threshold. |
-| `watchboard.digest` | `WatchboardDigestPayload` | Warning-class batch flushed to the shared watchboard session (--watchboard-batch / --watchboard-flush). |
+| `watchboard.digest` | `WatchboardDigestPayload` | Warning-class batch flushed to the shared watchboard session (--watchboard-batch / --watchboard-flush); each entry carries its fingerprint, object coordinates, and sanitized 512-byte-capped message. |
 | `watchboard.rotated` | `WatchboardRotatedPayload` | Size-based rotation pointer naming the successor watchboard session after --watchboard-rotate digests. |
 | `triage.regressed` | `TriageRegressedPayload` | Regression evidence: a downgraded incident's recurrence count reached --triage-regress-factor times its count at downgrade — evidence only, never a re-page. |
 | `family.member` | `FamilyMemberPayload` | Cross-source join: a signal from a different source family attached to this session's incident (leading↔reactive) — at most one per source family per incident per dedup window; storm members never fan these out. |

@@ -16,6 +16,7 @@ package watch
 
 import (
 	"context"
+	"strings"
 
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
@@ -39,6 +40,29 @@ func maskString(s string) string { return emit.MaskString(s) }
 // nil stays nil for omitempty parity.
 func maskLabels(labels map[string]string) map[string]string {
 	return emit.MaskMap(labels)
+}
+
+// sanitizeWatchboardMessage masks credential shapes in s and caps the
+// result to inject.MaxWatchboardMessageBytes (512 UTF-8 bytes on a rune
+// boundary). Idempotent across repeated passes (digestPayload assembly
+// followed by MaskingSink): any trailing truncation markers are stripped
+// before MaskString runs so regexes never match "…[truncated]" as a
+// credential value, and CapWatchboardMessage never splits an existing
+// "[REDACTED...]" token across the cut boundary.
+func sanitizeWatchboardMessage(s string) string {
+	if s == "" {
+		return ""
+	}
+	wasTruncated := false
+	for strings.HasSuffix(s, inject.WatchboardTruncMarker) {
+		s = strings.TrimSuffix(s, inject.WatchboardTruncMarker)
+		wasTruncated = true
+	}
+	masked := emit.MaskString(s)
+	if wasTruncated {
+		return inject.CapWatchboardTruncatedPrefix(masked)
+	}
+	return inject.CapWatchboardMessage(masked)
 }
 
 // MaskPayload sanitizes free text, labels, and annotations across all
@@ -83,6 +107,22 @@ func MaskPayload(payload any) any {
 	case inject.FamilyMemberPayload:
 		p.Message = emit.MaskString(p.Message)
 		return p
+	case inject.WatchboardDigestPayload:
+		if len(p.Entries) > 0 {
+			entries := make([]inject.WatchboardEntry, len(p.Entries))
+			copy(entries, p.Entries)
+			for i := range entries {
+				entries[i].Message = sanitizeWatchboardMessage(entries[i].Message)
+			}
+			p.Entries = entries
+		}
+		return p
+	case *inject.WatchboardDigestPayload:
+		if p == nil {
+			return payload
+		}
+		cp := MaskPayload(*p).(inject.WatchboardDigestPayload)
+		return &cp
 	case map[string]string:
 		return emit.MaskMap(p)
 	case map[string]any:
