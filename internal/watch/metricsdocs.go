@@ -20,8 +20,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/go-steer/k8s-lookout/internal/telemetry"
-	"github.com/go-steer/k8s-lookout/pkg/sources/computeclass"
-	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 )
 
 // MetricDoc documents one sentinel Prometheus metric for generated
@@ -51,12 +49,7 @@ type MetricDoc struct {
 // The per-runner bundle comes first, then the process-level fleet
 // metrics — every per-runner series additionally carries a const
 // cluster label, which the fleet ones cannot (see fleetMetrics) — and
-// last the leeway block, which is the one part of this page that cannot
-// be derived: those instruments are declared on the OpenTelemetry API
-// and reach the same registry through a bridge, so there is no
-// Collector to Describe. They are owned, and pinned against the real
-// exporter, by pkg/sources/topologydrift.MetricDocs and
-// pkg/sources/computeclass.MetricDocs.
+// last the OTLP export SLIs owned by internal/telemetry.
 func MetricsInventory() []MetricDoc {
 	m := newMetrics()
 	fm := newFleetMetrics(prometheus.NewRegistry())
@@ -118,35 +111,17 @@ func MetricsInventory() []MetricDoc {
 		{m.namespaceErrors, "counter", []string{"namespace", "cause"}},
 		{fm.clusterResolveErrors, "counter", []string{"cluster", "cause"}},
 	}
-	out := make([]MetricDoc, 0, len(rows)+len(topologydrift.MetricDocs())+len(computeclass.MetricDocs()))
+	out := make([]MetricDoc, 0, len(rows)+len(telemetry.ExportSLIDocs()))
 	for _, r := range rows {
 		name, help := describeCollector(r.c)
 		out = append(out, MetricDoc{Name: name, Type: r.typ, Labels: r.labels, Help: help})
 	}
-	for _, d := range topologydrift.MetricDocs() {
-		out = append(out, MetricDoc{
-			Name:     d.Name,
-			Type:     d.Type,
-			Labels:   d.Labels,
-			Help:     d.Help,
-			Optional: d.Optional,
-		})
-	}
-	// §7.7's preference block, bridged the same way. It carries no
-	// Optional rows: none of these is behind a flag — the whole source is
-	// behind a CRD instead, and a page that said "opt-in" would send the
-	// reader looking for a flag that does not exist.
-	for _, d := range computeclass.MetricDocs() {
-		out = append(out, MetricDoc{Name: d.Name, Type: d.Type, Labels: d.Labels, Help: d.Help})
-	}
-	// §8.4's OTLP export SLIs. Plain collectors like the sentinel's own
-	// — so the name and help are derived, not written twice — but owned
-	// by internal/telemetry, because that is where the reader they
-	// describe is built. All optional: unlike the leeway series, which
-	// read zero to prove they are looking, these describe a push
-	// pipeline that does not exist until --otel-exporter=otlp builds
-	// one, and a zeroed export counter on a process with no exporter
-	// would claim a path that was never wired.
+	// OTLP export SLIs: plain collectors like the sentinel's own — so the
+	// name and help are derived, not written twice — owned by
+	// internal/telemetry, where the reader they describe is built. All
+	// optional: they describe a push pipeline that does not exist until
+	// --otel-exporter=otlp builds one, and a zeroed export counter on a
+	// process with no exporter would claim a path that was never wired.
 	for _, d := range telemetry.ExportSLIDocs() {
 		name, help := describeCollector(d.Collector)
 		out = append(out, MetricDoc{Name: name, Type: d.Type, Labels: d.Labels, Help: help, Optional: true})

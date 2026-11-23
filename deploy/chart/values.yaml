@@ -97,14 +97,6 @@ rbac:
   # skipped at startup.
   nodes: true
 
-# -- DEPRECATED (#842 — use github.com/go-steer/leeway): The optional
-# LeewayPolicy / ClusterLeewayPolicy CRDs for the deprecated topology-drift
-# watch source. Off by default and retained only during the Phase 1
-# deprecation window for explicit --sources=topology-drift callers; scheduled
-# for removal in Phase 2.
-leewayPolicyCRD:
-  install: false
-
 # -- Sentinel flags. These are the container args, verbatim: the image
 # entrypoint is ["/lookout", "watch"], so each entry splices in behind
 # `watch`. Setting `args` replaces the list wholesale, which is the

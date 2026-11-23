@@ -92,10 +92,6 @@ rules:
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["list", "watch"]
-  # DEPRECATED (#842): optional LeewayPolicy overrides — see deploy/12-clusterrole-watcher.yaml.
-  - apiGroups: ["leeway.lookout.go-steer.io"]
-    resources: ["leewaypolicies", "clusterleewaypolicies"]
-    verbs: ["list", "watch"]
   {{- if .Values.rbac.secrets }}
   - apiGroups: [""]
     resources: ["secrets"]

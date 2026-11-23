@@ -26,10 +26,10 @@ The §14 phase plan in [`docs/DESIGN.md`](./docs/DESIGN.md) is
   `findings ack`).
 - **Optional-CRD & ComputeClass posture coverage** — discovery-gated
   `state gateway`, `state keda`, and `state kcc` (`*.cnrm.cloud.google.com`),
-  plus static `audit computeclass` posture checks (live placement-drift
-  watch sources `topology-drift` / `compute-class` and in-tree `cmd/leeway`
-  are deprecated in [#842](https://github.com/go-steer/k8s-lookout/issues/842)
-  in favor of [`go-steer/leeway`](https://github.com/go-steer/leeway)).
+  plus static `audit computeclass` posture checks (live placement-skew
+  and `ComputeClass` rank drift moved to
+  [`go-steer/leeway`](https://github.com/go-steer/leeway) in
+  [#842](https://github.com/go-steer/k8s-lookout/issues/842)).
 - **Multi-cluster & multi-tenant surfaces** — read-path fleet fan-out
   (`--contexts`, `--kubeconfig-dir`, `--concurrency`), multi-cluster
   sentinel/MCP (`--clusters-from`), and per-caller Google OAuth identity

@@ -44,26 +44,13 @@ var otherSourceBulkReads = []ListRequirement{
 	{"acme.cert-manager.io", "orders"},                                  // expiry source ACME stalls
 	{"gateway.networking.k8s.io", "gateways"},                           // gateway source (discovery-gated)
 	{"gateway.networking.k8s.io", "httproutes"},                         // gateway source
-	// topology-drift source, FR-8 volume pinning: the claim says which volume
-	// (spec.volumeName), the volume's spec.nodeAffinity says whether the pod
-	// can be rebalanced at all. Object metadata and a node selector only —
-	// neither object holds data or credentials, which is what makes this a
-	// cheap grant rather than a secrets-shaped one.
+	// read-path volume checks (`health`, `state volumes`, `state storage`):
+	// claim binding (spec.volumeName) and volume metadata only — neither object
+	// holds data or credentials.
 	{"", "persistentvolumeclaims"},
 	{"", "persistentvolumes"},
-	// topology-drift source, FR-10 policy overrides: discovery-gated, and
-	// deliberately absent from the source's RequiredAccess() so that a cluster
-	// without the CRDs is not forced to carry the grant to start. A policy
-	// object is an operator's own placement declaration — a selector and a set
-	// of topology keys — so this reads configuration the operator wrote, not
-	// workload state.
-	{"leeway.lookout.go-steer.io", "leewaypolicies"},
-	{"leeway.lookout.go-steer.io", "clusterleewaypolicies"},
-	// compute-class source, §7.7: discovery-gated, and inert everywhere but
-	// GKE. What it reads is the class's ordered priority list — machine
-	// families, core and memory floors, spot/reservation flags — which is an
-	// operator's own hardware preference, not workload state. There are only
-	// ever a handful of these objects in a cluster.
+	// `audit computeclass`: GKE ComputeClass priority list (machine families,
+	// core and memory floors, spot/reservation flags); inert everywhere but GKE.
 	{"cloud.google.com", "computeclasses"},
 	// graph history, #507: with --store the watch topology graph records
 	// NetworkPolicy→Pod Governs edges (internal/watch routingAccess). Pod

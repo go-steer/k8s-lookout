@@ -13,17 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The black-hole OTLP soak (leeway design §14, phase 8): run the real
-# OTLP HTTP exporter against a collector that accepts every connection
-# and answers none, and check that the drop SLIs rise while the heap,
-# the RSS and /metrics stay put.
+# The black-hole OTLP soak: run the real OTLP HTTP exporter against a
+# collector that accepts every connection and answers none, and check
+# that the drop SLIs rise while the heap, the RSS and /metrics stay put.
 #
 # Deliberately NOT a CI step. A 24 h run has nowhere to live in a PR
 # check, and a soak short enough for one proves nothing a unit test does
 # not already prove (internal/telemetry/otlpexport_test.go has the
 # bounded, non-blocking and both-readers-agree assertions). This is the
 # thing you run on a spare machine before a release that touched the
-# export path, and whose table you paste into docs/leeway-design.md.
+# export path.
 #
 # Usage:
 #   dev/tools/soak-otlp                 # the 24 h exit-criterion run

@@ -23,7 +23,7 @@
 #   - cluster-scoped kinds (nodes and persistentvolumes come from
 #     clusterrole-watcher-nodes.yaml instead; nodes/proxy,
 #     storageclasses, ingressclasses, clusterroles, clusterrolebindings,
-#     webhook configurations, ComputeClasses, ClusterLeewayPolicies): a
+#     webhook configurations, ComputeClasses): a
 #     Role cannot grant them. The sources that need the rest are skipped at
 #     startup, one log line each — see README.md;
 #   - cert-manager Certificates and ACME Challenges/Orders: only the expiry
@@ -88,9 +88,6 @@ rules:
     verbs: ["list", "watch"]
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
-    verbs: ["list", "watch"]
-  - apiGroups: ["leeway.lookout.go-steer.io"]
-    resources: ["leewaypolicies"]
     verbs: ["list", "watch"]
   - apiGroups: [""]
     resources: ["secrets"]

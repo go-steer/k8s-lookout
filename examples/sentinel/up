@@ -35,10 +35,6 @@
 #   SETTLE          optional duration for --settle (e.g. 2m for crash-blip);
 #                   unset omits --settle so the sentinel runs its 0 (off)
 #                   default and smoke-tier crashloop stays unchanged.
-#   ENABLE_TOPOLOGY_DRIFT  optional 1/non-empty toggle enabling the deprecated
-#                   topology-drift source + --topology-* flags solely for the
-#                   legacy placement-drift / zone-unavailable scenarios during
-#                   the #842 Phase 1 deprecation window (unset = off).
 
 . "$(dirname "$0")/../lib.sh"
 require_examples_context
@@ -96,9 +92,6 @@ if ! kubectl top nodes >/dev/null 2>&1; then
   echo "  (examples/kind/up installs metrics-server; on other clusters install it and re-run)" >&2
   sources="k8s-events,object-state,rollout,workload,autoscaling,degradation,expiry,capacity"
 fi
-if [[ -n "${ENABLE_TOPOLOGY_DRIFT:-}" ]]; then
-  sources="$sources,topology-drift"
-fi
 # The gateway source is fatal at startup when the Gateway API CRDs are
 # not served, and a bare kind cluster has none. Only the gateway-cert
 # scenario installs them, and it re-runs this script on inject and on
@@ -138,14 +131,6 @@ args=(
   # 5m). Harmless when the gateway source is not enabled.
   "--gateway-grace=60s"
 )
-if [[ -n "${ENABLE_TOPOLOGY_DRIFT:-}" ]]; then
-  echo "▸ deprecated topology-drift source enabled (#842 Phase 1 legacy scenario)"
-  args+=(
-    "--topology-keys=topology.kubernetes.io/zone,topology.kubernetes.io/region,$LEEWAY_ZONE_KEY"
-    "--topology-domain-unavailable-keys=topology.kubernetes.io/zone,topology.kubernetes.io/region,$LEEWAY_ZONE_KEY"
-    "--topology-dwell=60s"
-  )
-fi
 # cert-manager's issuance grace (default 15m): how long an ACME
 # Challenge may stay pending AND how long a brand-new Certificate may
 # stay never-issued before expiry calls it failed (#552). Only the

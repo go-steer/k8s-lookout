@@ -67,9 +67,6 @@ rules:
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["list", "watch"]
-  - apiGroups: ["leeway.lookout.go-steer.io"]
-    resources: ["leewaypolicies"]
-    verbs: ["list", "watch"]
   {{- if $.Values.rbac.secrets }}
   - apiGroups: [""]
     resources: ["secrets"]

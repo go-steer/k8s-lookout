@@ -248,33 +248,9 @@ var migrations = []string{
 	);
 	CREATE INDEX finding_state_last_seen ON finding_state (last_seen);`,
 
-	// v7: §9.1's leeway alert state — the one thing in the
-	// topology-drift subsystem we are the sole source of truth for.
-	// Placement, inventory and resolved intent are all rebuilt from the
-	// API server on every sync; dwell timers are not, and §9.1's
-	// requirement reduces to one sentence: a 30-minute dwell must not
-	// restart its clock because a pod was rescheduled at minute 29.
-	//
-	// Keyed (cluster, subject_key, topology_key) — the grain §8.2's
-	// machine runs at. A workload with both a zone constraint and a
-	// hostname constraint is two independent episodes; it can be evenly
-	// spread across zones while stacked three-deep on one node.
-	//
-	// phase is the TEXT AlertPhase.String() rather than the enum's
-	// ordinal, so the table is readable from the sqlite3 CLI and a
-	// reordered enum cannot silently reinterpret old rows; an
-	// unrecognised phase decodes to "forget this episode" (see
-	// leeway.Reconcile). fires is the JSON array of flap instants in
-	// unix nanoseconds, already pruned to flapWindow by the machine.
-	//
-	// Written SYNCHRONOUSLY, bypassing the buffered writer that
-	// occurrences use: §9.2 puts alert transitions and baselines on
-	// different write policies precisely because losing 30 s of EWMA is
-	// irrelevant and losing a dwell timer is the one thing we promised
-	// not to do. Like memory_facts, triage_status and finding_state,
-	// exempt from the §9.1 TTL/size prune — volume is "how many
-	// subjects are drifting right now" and a resolved episode's row is
-	// deleted, which is what makes a recurrence read as new.
+	// v7 (retired in #842; DDL retained so forward-only schema numbering
+	// v1..v11 upgrades existing SQLite stores cleanly): legacy leeway alert
+	// state table.
 	`CREATE TABLE leeway_alert_state (
 		cluster      TEXT NOT NULL DEFAULT '',
 		subject_key  TEXT NOT NULL,
@@ -289,34 +265,9 @@ var migrations = []string{
 	);
 	CREATE INDEX leeway_alert_state_updated ON leeway_alert_state (updated_at);`,
 
-	// v8: §9.1's other "yes, persist this" row — the §7.5 learned
-	// baselines. Same grain as v7, and for the same reason: a subject's
-	// zone mix and its hostname mix are two independent estimates.
-	//
-	// The opposite write policy to v7, which is the whole point of §9.2
-	// listing them separately. Losing a dwell transition breaks the one
-	// durability promise §9.1 makes; losing thirty seconds of EWMA is
-	// irrelevant, so these are written in batches on a ticker and a
-	// crash costs one interval of learning out of a twelve-hour
-	// half-life.
-	//
-	// domains is a JSON array of {domain, share, deviation} in the
-	// set's canonical order. It is one column rather than a child table
-	// because it is only ever read and written whole — there is no
-	// query that wants one domain's share — and a child table would
-	// turn every flush of twenty thousand subjects into a delete and a
-	// re-insert of sixty thousand rows.
-	//
-	// dev_weight is not an optimisation. §7.5's deviation EWMA starts at
-	// zero and is corrected by the weight it has accumulated; a restart
-	// that dropped the weight would divide a converged deviation by a
-	// freshly-zeroed one.
-	//
-	// Unlike v7 this table is NOT bounded by "how many subjects are
-	// drifting right now" — a baseline exists for every subject that has
-	// ever been sampled — so it carries a prune by updated_at. A row
-	// untouched for longer than §9.3 step 7's stale window is worthless
-	// anyway: loading it restarts the maturity clock.
+	// v8 (retired in #842; DDL retained so forward-only schema numbering
+	// v1..v11 upgrades existing SQLite stores cleanly): legacy leeway
+	// learned baselines table.
 	`CREATE TABLE leeway_baseline (
 		cluster      TEXT NOT NULL DEFAULT '',
 		subject_key  TEXT NOT NULL,

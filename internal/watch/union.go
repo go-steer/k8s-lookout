@@ -63,14 +63,13 @@ import (
 // across all of them.
 //
 // Why union views rather than one source instance per shard: several sources
-// hold state that must span the scope — topology-drift's domain inventory,
-// compute-class's rank shares and the storm graph are distributions over the
-// union, and object-state, capacity and saturation would each emit their
-// cluster-scoped findings (node conditions, autoscaler status) once per
-// shard. Per-shard instances would also each answer §7.4 clearance for
-// incidents in namespaces they cannot see — "not in my cache" reads as
-// "gone", which is a false recovery. Merging below the sources instead keeps
-// every source exactly as it runs at the cluster scope.
+// hold state that must span the scope — the storm graph and capacity's pending
+// pod view are distributions over the union, and object-state, capacity and
+// saturation would each emit their cluster-scoped findings (node conditions,
+// autoscaler status) once per shard. Per-shard instances would also each answer
+// §7.4 clearance for incidents in namespaces they cannot see — "not in my
+// cache" reads as "gone", which is a false recovery. Merging below the sources
+// instead keeps every source exactly as it runs at the cluster scope.
 //
 // The view is read-only and covers exactly the informer types the sentinel
 // takes from its namespaced factory. Every other accessor is a nil embedded

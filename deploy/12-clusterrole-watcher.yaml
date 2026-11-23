@@ -256,10 +256,9 @@ rules:
     resources: ["networkpolicies"]
     verbs: ["list", "watch"]
   - apiGroups: [""]
-    # Retained for explicit --sources=topology-drift callers during the #842
-    # deprecation window (superseded by github.com/go-steer/leeway). Reads
-    # claim binding (spec.volumeName) and volume spec.nodeAffinity only —
-    # neither object holds data or credentials.
+    # Read-path volume posture (`lookout health`, `lookout state volumes`,
+    # `lookout state storage`): claim binding (spec.volumeName) and volume
+    # metadata only — neither object holds data or credentials.
     resources: ["persistentvolumeclaims", "persistentvolumes"]
     verbs: ["list", "watch"]
   - apiGroups: ["storage.k8s.io"]
@@ -294,13 +293,6 @@ rules:
     verbs: ["list", "watch"]
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
-    verbs: ["list", "watch"]
-  # ---- LeewayPolicy: DEPRECATED optional placement-intent overrides (#842) ----
-  # Retained during the #842 deprecation window for explicit
-  # --sources=topology-drift callers (superseded by github.com/go-steer/leeway).
-  # Inert on clusters without the CRDs; scheduled for removal in #842 Phase 2.
-  - apiGroups: ["leeway.lookout.go-steer.io"]
-    resources: ["leewaypolicies", "clusterleewaypolicies"]
     verbs: ["list", "watch"]
   # ---- secrets: expiry source + enrichment edges (#87) ----
   # §11 TRADEOFF — the broadest grant in this file: `list` on Secrets
@@ -379,10 +371,8 @@ rules:
     resources: ["gateways", "httproutes"]
     verbs: ["list", "watch"]
 
-  # GKE custom compute classes (`lookout audit computeclass`, plus explicit
-  # --sources=compute-class callers during the #842 deprecation window;
-  # live rank drift moved to github.com/go-steer/leeway). Inert on non-GKE
-  # clusters.
+  # GKE custom compute classes (`lookout audit computeclass`; live rank drift
+  # lives in github.com/go-steer/leeway). Inert on non-GKE clusters.
   - apiGroups: ["cloud.google.com"]
     resources: ["computeclasses"]
     verbs: ["list", "watch"]

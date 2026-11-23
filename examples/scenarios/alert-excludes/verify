@@ -35,7 +35,7 @@ if ! kubectl -n "$SENTINEL_NS" logs deploy/lookout-watch --tail=-1 2>/dev/null \
 fi
 echo "  ✓ excluded k8s-event CrashLoopBackOff persisted as info row in --store"
 
-wire_count="$(leeway_wire_count alert-excludes 'kind=k8s-event' 'BackOff|CrashLoopBackOff' 'worker-')"
+wire_count="$(stub_wire_count alert-excludes 'kind=k8s-event' 'BackOff|CrashLoopBackOff' 'worker-')"
 if [[ "$wire_count" -ne 0 ]]; then
   echo "  ✗ excluded CrashLoopBackOff opened ${wire_count} k8s-event inject(s), want 0" >&2
   stub_since alert-excludes | grep -E 'kind=k8s-event' | tail -n 10 >&2 || true

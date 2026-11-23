@@ -466,30 +466,51 @@ func TestSchemaV1_KindInventory(t *testing.T) {
 			t.Errorf("kind constant mismatch: inject %q vs engine %q", injectKind, engineKind)
 		}
 	}
-	// Every enumerated kind resolves to a struct the field ledger
-	// pins.
-	for kind, typ := range shippedKinds {
-		if kind == "" {
+	// Every enumerated kind (active and retired/reserved) resolves to a
+	// struct the field ledger pins, and retired names remain reserved in v1.
+	specs := schema.Kinds()
+	var activeCount, retiredCount int
+	wantRetired := map[string]bool{
+		"leeway.domain_unavailable": true,
+		"leeway.contract_violated":  true,
+		"leeway.placement_drift":    true,
+		"leeway.baseline_breach":    true,
+		"leeway.rank_wedged":        true,
+		"leeway.rank_degraded":      true,
+		"leeway.rank_no_migration":  true,
+		"leeway.rank_tier_unused":   true,
+	}
+	for _, spec := range specs {
+		if spec.Kind == "" {
 			t.Fatal("empty kind in the inventory")
 		}
+		if strings.TrimSpace(spec.Doc) == "" {
+			t.Errorf("kind %q has empty Doc", spec.Kind)
+		}
+		typ := reflect.TypeOf(spec.Payload)
 		if _, ok := frozenFields[typ.Name()]; !ok {
-			t.Errorf("kind %q maps to %s, which has no frozen field ledger", kind, typ.Name())
+			t.Errorf("kind %q maps to %s, which has no frozen field ledger", spec.Kind, typ.Name())
+		}
+		if spec.Retired {
+			retiredCount++
+			if !wantRetired[spec.Kind] {
+				t.Errorf("kind %q marked Retired without updating TestSchemaV1_KindInventory and docs/signal-schema-v1.md", spec.Kind)
+			}
+		} else {
+			activeCount++
+			if wantRetired[spec.Kind] {
+				t.Errorf("retired leeway kind %q is not marked Retired in pkg/inject/schema", spec.Kind)
+			}
 		}
 	}
-	// The inventory is complete: 13 cross-cutting + 39 source kinds
-	// (21 at the M5 freeze; workload.* +2 in #129, notification.* +3
-	// in #130, ingress.* +3 in #135, family.member +1 in #132,
-	// objectstate.* +2 in #134, capacity.cluster_forecast +1 in #131,
-	// autoscaling.* +2 in #131, gateway.* +2 in #168,
-	// sentinel.access_revoked +1 in #385, leeway.* +3 in #416
-	// (topology-drift's emittable verdict kinds), +4 more in #416
-	// phase 6 (the §7.7.4 preference-rank kinds) and
-	// leeway.domain_unavailable +1 in #416 phase 7, which completes the
-	// set docs/leeway-design.md §2.3 named, and expiry.challenge_stuck
-	// + expiry.order_failed +2 in #542 — additive-only, ledger + docs
-	// updated in the same changes).
+	// The v1 ledger holds 59 reserved names: 51 active kinds (13 cross-cutting
+	// + 38 active source kinds) and 8 retired/reserved leeway.* kinds (#842:
+	// retired, name reserved, never reused).
 	if len(shippedKinds) != 59 {
-		t.Errorf("shipped kind inventory has %d kinds, want 59 — a kind shipped (or was removed) without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
+		t.Errorf("v1 kind ledger has %d kinds, want 59 — a kind shipped or a reserved name was deleted without updating the v1 ledger and docs/signal-schema-v1.md", len(shippedKinds))
+	}
+	if activeCount != 51 || retiredCount != 8 {
+		t.Errorf("v1 kind split = %d active + %d retired, want 51 active + 8 retired", activeCount, retiredCount)
 	}
 }
 

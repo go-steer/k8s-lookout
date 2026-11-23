@@ -27,6 +27,8 @@ export default defineConfig({
   redirects: {
     '/getting-started/what-the-sentinel-watches':
       '/k8s-lookout/detect/sentinel/',
+    '/operations/leeway-standalone': '/k8s-lookout/operations/',
+    '/operations/placement': '/k8s-lookout/operations/',
   },
   integrations: [
     starlight({

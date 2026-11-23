@@ -53,10 +53,7 @@ run and logs one line naming the missing permission. `--storm=auto` turns
 off the same way. If you name a skipped source in an explicit `--sources`
 list, or set `--storm=on`, the sentinel refuses to start instead. That is
 the same rule as for any other missing grant. `quota`, `notifications` and
-`token-burn` never read the cluster and are never auto-enabled; the
-deprecated `topology-drift` and `compute-class` sources (superseded by
-`github.com/go-steer/leeway`, #842) are also excluded from
-`--sources=auto`.
+`token-burn` never read the cluster and are never auto-enabled.
 
 ## Which namespaces it watches
 

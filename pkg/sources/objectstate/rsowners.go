@@ -27,8 +27,8 @@ import (
 )
 
 // NewReplicaSetOwners backs ReplicaSetOwners with a ReplicaSet informer
-// — on the shared factory, the one the rollout source, topology-drift
-// and the storm graph already run. Asking for it registers the informer;
+// — on the shared factory, the one the rollout source and the storm
+// graph already run. Asking for it registers the informer;
 // the factory's next Start runs it.
 //
 // deployments, when non-nil, is the Deployment informer (object-state

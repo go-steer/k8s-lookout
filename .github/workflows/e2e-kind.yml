@@ -22,11 +22,10 @@ name: E2E (kind)
 #                      (~10 min: reactive events, state edges, rollout
 #                      source, recovery closed loop)
 #   - weekly / manual → the full non-destructive set (incl. pending-scaleup),
-#                      the leeway placement pair, gateway-cert, crash-blip,
-#                      then node-failure (~65 min). gateway-cert installs and
-#                      removes cert-manager + Envoy Gateway and crash-blip
-#                      toggles SETTLE=2m and waits out the settle+5m sweep,
-#                      both too heavy for smoke.
+#                      gateway-cert, crash-blip, then node-failure (~55 min).
+#                      gateway-cert installs and removes cert-manager + Envoy
+#                      Gateway and crash-blip toggles SETTLE=2m and waits out
+#                      the settle+5m sweep, both too heavy for smoke.
 #
 # Both tiers then run the T1 CLI UAT (examples/uat) against the same
 # cluster — the read-path half of the layer, per docs/testing/cli-uat.md.
@@ -51,7 +50,7 @@ on:
   workflow_dispatch:
     inputs:
       scenarios:
-        description: 'space-separated scenarios (empty = full set + leeway pair + gateway-cert + crash-blip + node-failure)'
+        description: 'space-separated scenarios (empty = full set + gateway-cert + crash-blip + node-failure)'
         required: false
         default: ''
   push:
@@ -121,21 +120,13 @@ jobs:
                 examples/e2e $SCENARIOS
               else
                 examples/e2e
-                examples/e2e placement-drift zone-unavailable
                 examples/e2e gateway-cert
                 examples/e2e crash-blip
                 examples/e2e node-failure
               fi
               ;;
             *)
-              # The leeway pair before node-failure, never after: a
-              # stopped worker2 leaves zone-b's domain finding open for
-              # the 30m resolve dwell, and zone-unavailable would then
-              # have nothing new to put on the wire. gateway-cert and
-              # crash-blip restart the sentinel (on inject and on revert),
-              # so they run after the leeway pair rather than between them.
               examples/e2e
-              examples/e2e placement-drift zone-unavailable
               examples/e2e gateway-cert
               examples/e2e crash-blip
               examples/e2e node-failure

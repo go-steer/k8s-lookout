@@ -402,7 +402,6 @@ var clusterScoped = map[schema.GroupResource]bool{
 	{Group: "node.k8s.io", Resource: "runtimeclasses"}:                                     true,
 	{Group: "certificates.k8s.io", Resource: "certificatesigningrequests"}:                 true,
 	{Group: "metrics.k8s.io", Resource: "nodes"}:                                           true,
-	{Group: "leeway.lookout.go-steer.io", Resource: "clusterleewaypolicies"}:               true,
 	{Group: "cloud.google.com", Resource: "computeclasses"}:                                true,
 }
 
@@ -439,8 +438,6 @@ var ShippedRoleGrants = map[schema.GroupResource][]string{
 	{Group: "autoscaling", Resource: "horizontalpodautoscalers"}:                         {"list", "watch"},
 	{Group: "discovery.k8s.io", Resource: "endpointslices"}:                              {"list", "watch"},
 	{Group: "policy", Resource: "poddisruptionbudgets"}:                                  {"list", "watch"},
-	{Group: "leeway.lookout.go-steer.io", Resource: "leewaypolicies"}:                    {"list", "watch"},
-	{Group: "leeway.lookout.go-steer.io", Resource: "clusterleewaypolicies"}:             {"list", "watch"},
 	{Resource: "secrets"}:                                                                {"list"},
 	{Resource: "serviceaccounts"}:                                                        {"list"},
 	{Group: "admissionregistration.k8s.io", Resource: "validatingwebhookconfigurations"}: {"list"},

@@ -22,8 +22,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/go-steer/k8s-lookout/internal/telemetry"
-	"github.com/go-steer/k8s-lookout/pkg/sources/computeclass"
-	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 )
 
 // TestMetricsInventoryComplete is the presence check behind the
@@ -58,21 +56,13 @@ func TestMetricsInventoryComplete(t *testing.T) {
 			}
 		}
 	}
-	// The leeway block has no collector to count: those instruments are
-	// declared on the OpenTelemetry API and bridged into the same
-	// registry, so their rows are owned by topologydrift.MetricDocs and
-	// computeclass.MetricDocs, and pinned there against the real
-	// exporter. Counted, not exempted — a row appearing here without one
-	// appearing there still fails.
-	bridged := len(topologydrift.MetricDocs()) + len(computeclass.MetricDocs())
 	// The OTLP export SLIs are ordinary collectors, but they live in
 	// internal/telemetry rather than in either metrics struct, so the
-	// field walk above cannot see them. Counted here for the same reason
-	// the bridged rows are: a row appearing on one side and not the
-	// other still fails.
+	// field walk above cannot see them. Counted here so a row appearing
+	// on one side and not the other still fails.
 	exportSLIs := len(telemetry.ExportSLIDocs())
-	if len(inv) != collectors+bridged+exportSLIs {
-		t.Fatalf("MetricsInventory has %d rows, metrics structs have %d collector fields + %d bridged rows + %d export SLIs — add the missing row(s) in metricsdocs.go", len(inv), collectors, bridged, exportSLIs)
+	if len(inv) != collectors+exportSLIs {
+		t.Fatalf("MetricsInventory has %d rows, metrics structs have %d collector fields + %d export SLIs — add the missing row(s) in metricsdocs.go", len(inv), collectors, exportSLIs)
 	}
 
 	seen := map[string]bool{}

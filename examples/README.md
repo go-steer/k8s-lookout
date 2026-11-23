@@ -86,8 +86,6 @@ Three surfaces to verify on, weakest to strongest:
 | `config-storm` | shared ConfigMap deleted, four consumers break (own namespace) | 4 incidents → ONE `storm` keyed on the **ConfigMap** + `storm.member`×N | `state edges` names `shared-config` |
 | `hpa-metrics-dead` | HPA on a Deployment with no cpu request (explicit) | `autoscaling.hpa_metrics_dead` after 15m sustain | `audit workloads` names it instantly; workload stays Available throughout |
 | `node-failure` | worker node dies (kind-only, explicit) | `objectstate.node_notready` + ONE `storm` | `health` nodes, `triage radius` |
-| `placement-drift` | replicas pinned to zone-a by a taint, then zone-b comes back (kind-only, explicit; **deprecated** #842 — moved to `go-steer/leeway`) | `leeway.contract_violated` (DoNotSchedule) + `leeway.placement_drift` (ScheduleAnyway), never `domain_unavailable` | sentinel `lookout_leeway_drift` metric |
-| `zone-unavailable` | zone-b's only node cordoned (kind-only, explicit; **deprecated** #842 — moved to `go-steer/leeway`) | exactly ONE `leeway.domain_unavailable` (`taint_exclusion`), no per-workload finding | sentinel `lookout_leeway_domains_unavailable` metric |
 | `gateway-cert` | Gateway HTTPS listener's cert-manager Certificate never issues (installs cert-manager + Envoy Gateway, explicit) | `expiry.warning` critical (`renewal=FAILED`) + `gateway.programming_failed` / `gateway.route_rejected` in the digest | `state gateway` names `listener=https`; the `http` listener stays programmed |
 | `crash-blip` | pod exits 4 times via `emptyDir` marker under `SETTLE=2m`, then stabilizes Ready (explicit, weekly) | zero `k8s-event` `BackOff` injects (held on `GateSettle`) | sentinel `/metrics` (`events_filtered{gate="settle"} >= 1`, `gate_outcomes{gate="settle",outcome="self_resolved"} >= 1`) |
 
@@ -293,14 +291,11 @@ the summary names only `unrecorded=CronJob`.
 `.github/workflows/e2e-kind.yml` runs these scenarios non-blocking
 against an image built from HEAD (`kind/up --build`): a smoke subset
 (crashloop, failed-mount, bad-rollout) on every push to main, and the
-full set plus the leeway placement scenarios (placement-drift,
-zone-unavailable) and node-failure weekly (or on demand via
-workflow_dispatch). The leeway pair runs before node-failure: a stopped
-worker2 leaves zone-b's domain finding open for leeway's 30m resolve
-dwell, and zone-unavailable would then have nothing new to report.
-The weekly run also includes gateway-cert, after the leeway pair. It
-installs and then uninstalls two controllers, which is too heavy for
-the smoke tier. Both tiers then run `examples/uat` at T1 against
+full default set plus `gateway-cert`, `crash-blip`, and `node-failure`
+weekly (or on demand via `workflow_dispatch`). `gateway-cert` installs
+and then uninstalls cert-manager and Envoy Gateway, and `crash-blip`
+toggles `SETTLE=2m` and waits out the settle+5m sweep, both too heavy
+for the smoke tier. Both tiers then run `examples/uat` at T1 against
 the same cluster. PR presubmits stay hermetic — a live cluster never
 gates a PR. CI sets `LOOKOUT_E2E_TIMEOUT_SCALE=2` because runners are
 slower than a workstation; set it locally if your machine needs more

@@ -357,10 +357,6 @@ if helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.se
   echo "✗ rbac.secrets=false appended --enrich-lists over one already in args" >&2
   exit 1
 fi
-# Off by default, so it never appears in the diffed render above — this is the
-# only check that the CRDs the chart serves from files/ are valid manifests.
-render_ok "leewayPolicyCRD.install" --set leewayPolicyCRD.install=true
-
 # serviceMonitor without a Service is a scrape target that silently
 # selects nothing; the chart refuses it, and this asserts the refusal.
 if helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" \

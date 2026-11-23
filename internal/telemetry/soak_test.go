@@ -17,10 +17,9 @@ package telemetry
 // The black-hole soak behind §14's Phase 8 exit criterion: the process
 // survives a black-holed OTLP endpoint for 24 h with flat RSS.
 //
-// This is a Go test and not a shell harness for the same reason
-// cmd/leeway's smoke test is: there is one copy of the setup, it
-// compiles, and `go test` is the only thing anyone has to know. It is
-// env-gated rather than tagged because §12.1 asks for something with
+// This is a Go test and not a shell harness so there is one copy of the
+// setup, it compiles, and `go test` is the only thing anyone has to know.
+// It is env-gated rather than tagged because §12.1 asks for something with
 // "somewhere to run that is not a PR check" — a build tag hides it from
 // `go vet` and from the compiler on every ordinary run, and a soak that
 // stops compiling between soaks is a soak nobody runs twice.

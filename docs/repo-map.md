@@ -14,9 +14,6 @@ the known gaps). Hard rules for contributors are in
 k8s-lookout/
 ├── cmd/lookout/          # multicall entrypoint: subcommand dispatch, --help, provider
 │                         #   blank-imports behind build tags, nm-based isolation test
-├── cmd/leeway/           # DEPRECATED (#842, superseded by github.com/go-steer/leeway):
-│                         #   standalone metrics-only placement binary retained during the
-│                         #   Phase 1 deprecation window (and layering_test.go enforcement)
 ├── internal/
 │   ├── axsink/           # AX agent sink implementation (task lifecycle + fast-path delivery)
 │   ├── axapi/            # Generated AX wire types
@@ -52,16 +49,14 @@ k8s-lookout/
 │   ├── inject/           # agent sinks behind the two-verb Sink interface (core-agent
 │   │                     #   daemon client + generic webhook) + FROZEN wire payload types
 │   ├── kube/             # client bootstrap (kubeconfig/in-cluster), informer trimming + paging
-│   ├── leeway/           # DEPRECATED (#842): in-tree placement copy retained for Phase 1;
-│   │                     #   audit computeclass + capacity import github.com/go-steer/leeway/pkg/leeway
 │   ├── memory/           # §9.2/§9.4 record types (distilled facts, triage-status) bound
 │   │                     #   to the sentinel store until core-agent ships a Memory surface
 │   ├── policy/           # four-layer posture policy engine + built-in profiles
 │   │                     #   (default, strict, onboarding, gke-autopilot) for `lookout audit`
 │   ├── sources/          # §7.2 signal sources, one package each: k8sevents, objectstate,
 │   │                     #   rollout, workload, autoscaling, saturation, degradation, expiry,
-│   │                     #   capacity, ingress, gateway, topologydrift, computeclass, quota,
-│   │                     #   notifications, tokenburn; rbac.go declares per-source RBAC rules
+│   │                     #   capacity, ingress, gateway, quota, notifications, tokenburn;
+│   │                     #   rbac.go declares per-source RBAC rules
 │   └── store/            # sentinel-local SQLite: occurrences, graph history, records
 ├── skills/               # workflow skills + playbooks; references/ are GENERATED
 ├── deploy/               # sentinel manifests + Helm chart (deploy/chart): SA, read-only
@@ -249,6 +244,14 @@ Where the tree deliberately differs from DESIGN.md, in one place:
   still stable, and push/scan self-consistent; the §9.4 join
   tolerates the mismatch via its resource-key pin
   (`pkg/memory/join.go`).
+- **Leeway extracted to standalone module (#842):** DESIGN.md §4.1 ("The
+  one exception: `cmd/leeway`") and §7.2 (`topology-drift`,
+  `compute-class`) predate #842, which extracted placement-skew and GKE
+  `ComputeClass` fallback tracking into `github.com/go-steer/leeway`
+  (`leeway report`) and restored `k8s-lookout` to a single multicall
+  binary (`cmd/lookout`). Read-path `audit computeclass` and `capacity`
+  scale-up verdict classification remain in-tree, importing
+  `github.com/go-steer/leeway/pkg/leeway`.
 
 ## Further pointers
 
@@ -270,10 +273,10 @@ Where the tree deliberately differs from DESIGN.md, in one place:
     and the `emit.Finding` (`--format=findings`) audit ledger seam.
   - [`findings-diff-design.md`](./findings-diff-design.md) — stateful
     finding transition stream (`lookout findings diff` and `findings ack`).
-  - [`leeway-design.md`](./leeway-design.md) — placement-drift design
-    (watch sources `topology-drift` & `compute-class`, in-tree `pkg/leeway`,
-    and `cmd/leeway` are deprecated in #842 in favor of
-    `github.com/go-steer/leeway`; read-path `audit computeclass` stays).
+  - [`leeway-design.md`](./leeway-design.md) — pointer to
+    `github.com/go-steer/leeway` after #842 extracted placement-skew and
+    GKE `ComputeClass` fallback tracking out of `lookout watch`
+    (read-path `audit computeclass` stays).
   - [`in-pod-probe-design.md`](./in-pod-probe-design.md) — `net probe-from`,
     the opt-in privileged ephemeral-container probe (`deploy-probe/`).
   - [`multi-cluster-design.md`](./multi-cluster-design.md) and

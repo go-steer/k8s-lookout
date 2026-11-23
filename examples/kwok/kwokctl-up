@@ -28,7 +28,6 @@
 # Usage:
 #   examples/kwok/kwokctl-up
 #   examples/kwok/scale-up 2000 5000 25   # 2,000 nodes, 100,500 padded pods
-#   examples/kwok/leeway-scale
 #   examples/kwok/bench
 #   examples/kwok/kwokctl-down
 #
@@ -147,8 +146,6 @@ echo "For ad-hoc kubectl or lookout commands in your shell:"
 echo "  export KUBECONFIG=\"$KWOKCTL_KUBECONFIG\""
 echo
 echo "Next:"
-echo "  examples/kwok/leeway-scale                # rung 0 (empty cluster)"
 echo "  examples/kwok/scale-up 2000 5000 25       # 2,000 nodes, 100,500 padded pods"
-echo "  examples/kwok/leeway-scale                # loaded rung + marginal verdict"
 echo "  examples/kwok/bench                       # read-path timings & peak RSS"
 echo "  examples/kwok/kwokctl-down                # tear down cluster & kubeconfig"

@@ -48,8 +48,8 @@ import (
 //     Roles pass and cluster-scoped needs — nodes above all — are still
 //     asked cluster-wide;
 //   - the handful of reads that are not informers on the shared factory
-//     (saturation's polled LISTs, expiry's scans, the gateway and
-//     LeewayPolicy dynamic informers, node-incident enrichment) are told the
+//     (saturation's polled LISTs, expiry's scans, the gateway dynamic
+//     informers, node-incident enrichment) are told the
 //     namespaces in wiring.go, because a probe that passes in-namespace over
 //     a read that is still cluster-wide would be a 403 at runtime, or for an
 //     informer a sync that never completes.

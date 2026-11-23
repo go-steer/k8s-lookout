@@ -227,28 +227,37 @@ func watchPage() string {
 
 func kindsPage() string {
 	kinds := schema.Kinds()
+	var activeCount, retiredCount int
+	for _, k := range kinds {
+		if k.Retired {
+			retiredCount++
+		} else {
+			activeCount++
+		}
+	}
 	var b strings.Builder
 	frontmatter(&b, "Signal kinds",
-		"The signal-schema v1 kind catalog — every kind the sentinel can put on the wire, from the frozen ledger.")
+		"The signal-schema v1 kind catalog — every active and retired/reserved kind in the frozen ledger.")
 	fmt.Fprintf(&b, ""+
-		"The signal-schema v1 kind inventory (%d kinds), rendered from the SAME\n"+
-		"exported ledger (`pkg/inject/schema`) the freeze tests in `pkg/inject` pin\n"+
+		"The signal-schema v1 kind inventory (%d kinds in the frozen ledger: %d active,\n"+
+		"%d retired and reserved), rendered from the SAME exported ledger\n"+
+		"(`pkg/inject/schema`) the freeze tests in `pkg/inject` pin\n"+
 		"(docs/signal-schema-v1.md). The schema is FROZEN: removing or renaming a kind\n"+
 		"or a frozen field is a v2 negotiation with fleet consumers, never a\n"+
-		"routine change;\n"+
-		"additions are v1-additive and extend the ledger, the field pins, and the\n"+
+		"routine change; retired kinds keep their names permanently reserved in v1,\n"+
+		"and additions are v1-additive and extend the ledger, the field pins, and the\n"+
 		"schema doc in the same change.\n\n"+
 		"Every payload carries a stable incident-class `fingerprint` plus\n"+
 		"`cluster`/`project`/`zone` join dimensions — fleet rollup is a join, not a\n"+
 		"parsing project. The one exception is the frozen reactive pair\n"+
 		"(`k8s-event`, `k8s-event-followup`), whose wire shape stays\n"+
 		"byte-identical for playbook back-compat and never gains the\n"+
-		"identity fields.\n\n", len(kinds))
+		"identity fields.\n\n", len(kinds), activeCount, retiredCount)
 
 	b.WriteString("## Cross-cutting kinds\n\nEmitted by the dispatcher itself (outcome records, storms, watchboard, triage evidence) plus the frozen reactive pair.\n\n")
 	b.WriteString("| Kind | Wire struct | Role |\n| --- | --- | --- |\n")
 	for _, k := range kinds {
-		if k.Source != "" && k.Source != "k8s-events" {
+		if k.Retired || (k.Source != "" && k.Source != "k8s-events") {
 			continue
 		}
 		fmt.Fprintf(&b, "| `%s` | `%s` | %s |\n", k.Kind, structName(k.Payload), cell(k.Doc))
@@ -257,10 +266,21 @@ func kindsPage() string {
 	b.WriteString("\n## Source-namespaced kinds\n\nAll ride `inject.Payload` with the full identity stamped (`source`, `severity`, `fingerprint`, `project`, `zone`). The source column is the `--sources` name that emits the kind.\n\n")
 	b.WriteString("| Kind | Source | Role |\n| --- | --- | --- |\n")
 	for _, k := range kinds {
-		if k.Source == "" || k.Source == "k8s-events" {
+		if k.Retired || k.Source == "" || k.Source == "k8s-events" {
 			continue
 		}
 		fmt.Fprintf(&b, "| `%s` | `%s` | %s |\n", k.Kind, k.Source, cell(k.Doc))
+	}
+
+	if retiredCount > 0 {
+		b.WriteString("\n## Retired kinds (name reserved, never reused)\n\nRetired in `#842` when in-tree leeway watch sources were removed in favor of [`github.com/go-steer/leeway`](https://github.com/go-steer/leeway). Their wire names and `inject.Payload` mapping remain permanently reserved in signal-schema v1 so historical records decode cleanly and no future source can collide with them.\n\n")
+		b.WriteString("| Kind | Former source | Wire struct | Status |\n| --- | --- | --- | --- |\n")
+		for _, k := range kinds {
+			if !k.Retired {
+				continue
+			}
+			fmt.Fprintf(&b, "| `%s` | `%s` | `%s` | %s |\n", k.Kind, k.Source, structName(k.Payload), cell(k.Doc))
+		}
 	}
 	b.WriteString("\nField-level detail (ordered json field lists, omitempty rules, the fingerprint recipe) lives in [`docs/signal-schema-v1.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/signal-schema-v1.md).\n")
 	return b.String()
@@ -323,11 +343,6 @@ func metricsPage() string {
 		"the Prometheus client does not expose them before first observation. A\n" +
 		"presence-check test (`TestMetricsInventoryComplete`) fails when a collector\n" +
 		"is added without an inventory row.\n\n" +
-		"The `lookout_leeway_*` block is the exception: those instruments are declared\n" +
-		"on the OpenTelemetry metric API and bridged into the same registry, so they\n" +
-		"have no collector to describe. Their rows are written out in\n" +
-		"`pkg/sources/topologydrift.MetricDocs` and pinned there against the real\n" +
-		"exporter, names, types and labels included.\n\n" +
 		"Rows marked **opt-in** are absent from a default scrape until a flag turns\n" +
 		"them on; see the [`lookout watch` flag table](/reference/watch/).\n\n")
 	b.WriteString("| Metric | Type | Labels | Meaning |\n| --- | --- | --- | --- |\n")

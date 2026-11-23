@@ -226,11 +226,8 @@ func TestNewTransformingFactory_TrimsOnTheWayIntoTheCache(t *testing.T) {
 	if cachedNode.Status.Images != nil {
 		t.Error("status.images reached the shared cache — the largest single line item")
 	}
-	if _, ok := cachedNode.Annotations["ccc_priority_index"]; !ok {
-		t.Error("ccc_priority_index was filtered out — §7.7 preference-rank tracking goes silent")
-	}
-	if _, ok := cachedNode.Annotations["kubectl.kubernetes.io/last-applied"]; ok {
-		t.Error("an unretained annotation survived")
+	if len(cachedNode.Annotations) != 0 {
+		t.Errorf("node annotations reached the shared cache: %v", cachedNode.Annotations)
 	}
 	if !hasCondition(cachedNode.Status.Conditions, corev1.NodeReady) {
 		t.Error("NodeReady was dropped")

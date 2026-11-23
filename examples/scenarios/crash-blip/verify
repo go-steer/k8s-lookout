@@ -28,7 +28,7 @@ kubectl -n "$DEMO_NS" wait --for=condition=Ready pod -l app=crash-blip --timeout
 # LOOKOUT_E2E_TIMEOUT_SCALE in CI).
 await_metric_ge 600 'lookout_watch_gate_outcomes_total' 'gate="settle",outcome="self_resolved"' 1
 
-wire_count="$(leeway_wire_count crash-blip 'kind=k8s-event' 'BackOff|CrashLoopBackOff' 'crash-blip-')"
+wire_count="$(stub_wire_count crash-blip 'kind=k8s-event' 'BackOff|CrashLoopBackOff' 'crash-blip-')"
 if [[ "$wire_count" -ne 0 ]]; then
   echo "  ✗ crash-blip opened ${wire_count} k8s-event BackOff inject(s), want 0" >&2
   stub_since crash-blip | grep -E 'kind=k8s-event' | tail -n 10 >&2 || true

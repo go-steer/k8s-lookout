@@ -14,13 +14,11 @@
 
 package telemetry
 
-// The OTLP push path's hardening (leeway design §8.4).
+// The OTLP push path's hardening.
 //
 // The failure being designed against is an exporter with an unbounded
-// queue and an unreachable endpoint, which is an OOM. Leeway's whole
-// output is metrics, so its export path carries more points than any
-// other source's, and the deployment most likely to black-hole its
-// collector is the metrics-only one where leeway IS the product.
+// queue and an unreachable endpoint, which is an OOM when a collector is
+// unreachable or black-holed.
 //
 // The bound is structural rather than something added here, and it is
 // worth stating plainly because "bounded queue, drop on full" describes
