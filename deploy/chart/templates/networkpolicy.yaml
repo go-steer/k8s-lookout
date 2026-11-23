@@ -1,4 +1,4 @@
-{{- if .Values.networkPolicy.create }}
+{{- if and (not (include "lookout.mcpMode" .)) .Values.networkPolicy.create }}
 # SOURCE OF TRUTH: deploy/16-networkpolicy-watcher.yaml.
 #
 # Default-deny ingress. The sentinel is a privileged reader — its

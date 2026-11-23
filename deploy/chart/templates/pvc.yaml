@@ -1,4 +1,4 @@
-{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+{{- if and (not (include "lookout.mcpMode" .)) .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
 # Only when persistence is on and no claim was named. The occurrence
 # store is telemetry, never control flow, so this is opt-in: what a PVC
 # buys is post-mortem history that survives a reschedule (`--at`

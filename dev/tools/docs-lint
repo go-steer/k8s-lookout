@@ -35,7 +35,9 @@
 #   8. Hardcoded scenario counts   — "ten inject/verify/revert failure scenarios", ...
 #   9. Stale/unguarded kind counts — "32-kind inventory", "48 signal kinds", ...
 #  10. Internal Markdown links     — scripts/verify-internal-links.py --markdown-only
-#                                    over README.md and docs/**
+#                                    over README.md, docs/**, and deploy*/**/*.md
+#  11. Deployment variants ledger  — every deploy* directory has a README.md and
+#                                    appears in docs/repo-map.md ## Deployment variants
 #
 # Scope:
 #   Prose-count rules (1–5, 7–9) scan root contributor/user docs (README.md,
@@ -166,9 +168,9 @@ scoped_paths() {
     README.md AGENTS.md CONTRIBUTING.md ROADMAP.md SECURITY.md \
     docs/repo-map.md docs/adding-a-check.md docs/cli-stability-policy.md \
     docs/release-process.md docs/signal-schema-v1.md docs/audit-ingestion-contract.md \
-    examples/README.md deploy-namespaced/README.md deploy/chart/README.md \
+    examples/README.md deploy deploy-* \
     docs/site/src/content \
-    -type f \( -name '*.md' -o -name '*.mdx' \) 2>/dev/null | sort
+    -type f \( -name '*.md' -o -name '*.mdx' \) 2>/dev/null | sort -u
 }
 
 all_markdown_except_changelog() {
@@ -541,6 +543,68 @@ for _, msg in findings:
 PY
 }
 
+# Check 11: deployment variants README presence + docs/repo-map.md table sync (#852).
+check_deploy_variants() {
+  local root="${1:-.}"
+  python3 - "$root" <<'PY'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve()
+seen: set[str] = set()
+
+deploy_dir = root / "deploy"
+if deploy_dir.is_dir():
+    for d in [deploy_dir, *deploy_dir.rglob("*")]:
+        if not d.is_dir() or "templates" in d.relative_to(deploy_dir).parts:
+            continue
+        if (d / "kustomization.yaml").is_file() or (d / "Chart.yaml").is_file():
+            seen.add(d.relative_to(root).as_posix() + "/")
+
+for entry in root.iterdir():
+    if entry.is_dir() and entry.name.startswith("deploy-"):
+        seen.add(entry.name + "/")
+
+live = sorted(seen)
+for rel in live:
+    readme = root / rel.rstrip("/") / "README.md"
+    if not readme.is_file() or not readme.read_text(encoding="utf-8").strip():
+        print(f"{rel}README.md:1: missing or empty README.md for deployment variant directory {rel}")
+
+repo_map = root / "docs/repo-map.md"
+if not repo_map.is_file():
+    print("docs/repo-map.md:1: missing docs/repo-map.md")
+    sys.exit(0)
+
+row_re = re.compile(r"^\|\s*(?:\[`([^`]+)`\]\([^)]+\)|`([^`]+)`)")
+in_sec = False
+table: list[str] = []
+for lineno, line in enumerate(repo_map.read_text(encoding="utf-8").splitlines(), 1):
+    s = line.strip()
+    if s.startswith("## "):
+        if s == "## Deployment variants":
+            in_sec = True
+            continue
+        if in_sec:
+            break
+    if not in_sec:
+        continue
+    m = row_re.match(s)
+    if m:
+        table.append(m.group(1) or m.group(2))
+
+table_sorted = sorted(table)
+if table_sorted != live:
+    missing = sorted(set(live) - set(table_sorted))
+    extra = sorted(set(table_sorted) - set(live))
+    if missing:
+        print(f"docs/repo-map.md:1: ## Deployment variants table missing live directories: {', '.join(missing)}")
+    if extra:
+        print(f"docs/repo-map.md:1: ## Deployment variants table lists non-existent directories: {', '.join(extra)}")
+PY
+}
+
 # ---- driver -----------------------------------------------------------
 
 run_all_checks() {
@@ -579,6 +643,13 @@ run_all_checks() {
   if ! link_out=$(python3 scripts/verify-internal-links.py --markdown-only 2>&1); then
     printf '%s\n' "$link_out"
     findings=$((findings + 1))
+  fi
+
+  local dep_out
+  dep_out=$(check_deploy_variants ".")
+  if [[ -n "$dep_out" ]]; then
+    printf '%s\n' "$dep_out"
+    findings=$((findings + $(printf '%s\n' "$dep_out" | wc -l)))
   fi
 
   if (( findings > 0 )); then
@@ -693,8 +764,40 @@ EOF
     out=1
   fi
 
+  mkdir -p "$tmp/deploy-tree/deploy/base" "$tmp/deploy-tree/deploy-old" "$tmp/deploy-tree/docs"
+  touch "$tmp/deploy-tree/deploy/base/kustomization.yaml" "$tmp/deploy-tree/deploy-old/kustomization.yaml"
+  echo "# base" > "$tmp/deploy-tree/deploy/base/README.md"
+  cat > "$tmp/deploy-tree/docs/repo-map.md" <<'EOF'
+# Map
+
+## Deployment variants
+
+| Directory | Kind |
+| --- | --- |
+| `deploy/base/` | base |
+| `deploy-stale/` | alias |
+EOF
+  n=$(check_deploy_variants "$tmp/deploy-tree" | wc -l)
+  (( n >= 3 )) || { echo "self-test: check_deploy_variants fired $n times, expected ≥3"; out=1; }
+
+  echo "# old" > "$tmp/deploy-tree/deploy-old/README.md"
+  cat > "$tmp/deploy-tree/docs/repo-map.md" <<'EOF'
+# Map
+
+## Deployment variants
+
+| Directory | Kind |
+| --- | --- |
+| `deploy/base/` | base |
+| `deploy-old/` | alias |
+EOF
+  if [[ -n "$(check_deploy_variants "$tmp/deploy-tree")" ]]; then
+    echo "self-test: unexpected check_deploy_variants finding on clean tree"
+    out=1
+  fi
+
   if (( out == 0 )); then
-    echo "docs-lint self-test: OK (all 9 rules + internal link self-test passed)"
+    echo "docs-lint self-test: OK (all rules + deploy-variants + internal link self-test passed)"
   fi
   return $out
 }

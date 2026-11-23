@@ -42,17 +42,24 @@ One deliberate tradeoff to know about: the expiry source's `secrets`
 rule is the sentinel's only read of Secret values (`tls.crt` to parse
 `notAfter`; the token JWT for its `exp` claim), and it is `list` only —
 no watch, no get, no informer cache of secret material. Scope it with
-`--expiry-namespaces`, or deploy `deploy-no-secrets/` (Helm:
-`rbac.secrets=false`), the shipped variant without it — see
+`--expiry-namespaces`, or compose `deploy/components/no-secrets/` on top
+of `deploy/base/` (Helm: `rbac.secrets=false`; legacy alias:
+`deploy-no-secrets/`) — see
 [Without the Secret grant](/operations/scoping/#without-the-secret-grant)
 for exactly what that costs.
 
-To watch only chosen namespaces, deploy `deploy-namespaced/` (Helm:
-`rbac.scope=namespace`). It uses a Role in each namespace plus a
-ClusterRole that can only read nodes and persistent volumes. If you
-cannot be given any ClusterRole, `deploy-namespaced-strict/` (Helm: add
-`rbac.nodes=false`) uses Roles only. It is much thinner, because it
-cannot see nodes. See
+To watch only chosen namespaces, compose
+`deploy/components/scope-namespaced/` (Helm: `rbac.scope=namespace`;
+legacy alias: `deploy-namespaced/`). It uses a Role in each namespace
+plus a ClusterRole that can only read nodes and persistent volumes. If
+you cannot be given any ClusterRole, compose
+`deploy/components/scope-namespaced-strict/` (Helm: add
+`rbac.nodes=false`; legacy alias: `deploy-namespaced-strict/`). It is
+much thinner, because it cannot see nodes. Because each option under
+`deploy/components/` (`sink-ax`, `no-secrets`, `scope-namespaced`,
+`scope-namespaced-strict`, `probe-from`) is a Kustomize `Component`,
+they combine in a single `components:` list (for example `sink-ax` +
+`no-secrets`). See
 [Watching a list of namespaces](/operations/scoping/#watching-a-list-of-namespaces).
 
 ### Narrowing the role — partial bundles, not errors
@@ -142,7 +149,9 @@ quarter's RBAC is a build failure rather than a discovery you make
 during an incident. Run it yourself with
 `dev/tools/verify-helm-parity`.
 
-What the chart adds over `kubectl apply -k` is the toggles: RBAC tiers
+What the chart adds over `kubectl apply -k` is the toggles: operating
+mode (`mode=watch` default or `mode=mcp` matching `deploy/mcp/`), sink
+selection (`sink.type`: `core-agent`, `webhook`, or `ax`), RBAC tiers
 (`rbac.create`, `rbac.capacity`), a PVC for the occurrence store
 (`persistence.enabled`), the prometheus-operator ServiceMonitor
 (`serviceMonitor.enabled`, which is the `deploy/prometheus-operator/`

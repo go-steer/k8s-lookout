@@ -173,16 +173,16 @@ func TestShippedClusterRoleStaysReadOnly(t *testing.T) {
 
 func loadWatcherClusterRole(t *testing.T) *rbacv1.ClusterRole {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "12-clusterrole-watcher.yaml"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "base", "12-clusterrole-watcher.yaml"))
 	if err != nil {
 		t.Fatalf("reading shipped ClusterRole: %v", err)
 	}
 	var role rbacv1.ClusterRole
 	if err := yaml.Unmarshal(data, &role); err != nil {
-		t.Fatalf("parsing deploy/12-clusterrole-watcher.yaml: %v", err)
+		t.Fatalf("parsing deploy/base/12-clusterrole-watcher.yaml: %v", err)
 	}
 	if role.Kind != "ClusterRole" || role.Name != "lookout-watch" {
-		t.Fatalf("unexpected object %s/%s in deploy/12-clusterrole-watcher.yaml", role.Kind, role.Name)
+		t.Fatalf("unexpected object %s/%s in deploy/base/12-clusterrole-watcher.yaml", role.Kind, role.Name)
 	}
 	return &role
 }
@@ -215,13 +215,13 @@ func groupLabel(group string) string {
 }
 
 func TestShippedNamespacedRoleStaysReadOnly(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy-namespaced", "role-watcher.yaml"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "components", "scope-namespaced", "role-watcher.yaml"))
 	if err != nil {
-		t.Fatalf("reading deploy-namespaced/role-watcher.yaml: %v", err)
+		t.Fatalf("reading deploy/components/scope-namespaced/role-watcher.yaml: %v", err)
 	}
 	var role rbacv1.Role
 	if err := yaml.Unmarshal(data, &role); err != nil {
-		t.Fatalf("parsing deploy-namespaced/role-watcher.yaml: %v", err)
+		t.Fatalf("parsing deploy/components/scope-namespaced/role-watcher.yaml: %v", err)
 	}
 	readOnly := []string{"get", "list", "watch"}
 	for _, rule := range role.Rules {
@@ -241,13 +241,13 @@ func TestShippedNamespacedRoleStaysReadOnly(t *testing.T) {
 }
 
 func TestShippedNodesClusterRoleStaysMinimal(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy-namespaced", "clusterrole-watcher-nodes.yaml"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "components", "scope-namespaced", "clusterrole-watcher-nodes.yaml"))
 	if err != nil {
-		t.Fatalf("reading deploy-namespaced/clusterrole-watcher-nodes.yaml: %v", err)
+		t.Fatalf("reading deploy/components/scope-namespaced/clusterrole-watcher-nodes.yaml: %v", err)
 	}
 	var role rbacv1.ClusterRole
 	if err := yaml.Unmarshal(data, &role); err != nil {
-		t.Fatalf("parsing deploy-namespaced/clusterrole-watcher-nodes.yaml: %v", err)
+		t.Fatalf("parsing deploy/components/scope-namespaced/clusterrole-watcher-nodes.yaml: %v", err)
 	}
 	readOnly := []string{"get", "list", "watch"}
 	allowedResources := []string{"nodes", "persistentvolumes"}
@@ -266,13 +266,13 @@ func TestShippedNodesClusterRoleStaysMinimal(t *testing.T) {
 }
 
 func TestShippedCapacityRolePinsResourceName(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "14-role-watcher-capacity.yaml"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "base", "14-role-watcher-capacity.yaml"))
 	if err != nil {
-		t.Fatalf("reading deploy/14-role-watcher-capacity.yaml: %v", err)
+		t.Fatalf("reading deploy/base/14-role-watcher-capacity.yaml: %v", err)
 	}
 	var role rbacv1.Role
 	if err := yaml.Unmarshal(data, &role); err != nil {
-		t.Fatalf("parsing deploy/14-role-watcher-capacity.yaml: %v", err)
+		t.Fatalf("parsing deploy/base/14-role-watcher-capacity.yaml: %v", err)
 	}
 	if role.Namespace != "kube-system" {
 		t.Errorf("capacity Role namespace = %q, want kube-system", role.Namespace)
@@ -286,6 +286,104 @@ func TestShippedCapacityRolePinsResourceName(t *testing.T) {
 		}
 		if slices.Contains(rule.Verbs, "get") && !slices.Equal(rule.ResourceNames, []string{"cluster-autoscaler-status"}) {
 			t.Errorf("capacity Role get rule must pin resourceNames=[\"cluster-autoscaler-status\"], got %v", rule.ResourceNames)
+		}
+	}
+}
+
+// TestNoSecretsComponentPatchesMatchBaseMinusSecrets pins both strategic-merge
+// RBAC patches in deploy/components/no-secrets/ (#852) to their respective
+// source manifests minus `secrets` and `serviceaccounts`, and ensures the
+// deprecated root compatibility copies in deploy/ stay byte-equal to
+// deploy/base/.
+func TestNoSecretsComponentPatchesMatchBaseMinusSecrets(t *testing.T) {
+	stripSecretsAndSAs := func(rules []rbacv1.PolicyRule) []rbacv1.PolicyRule {
+		var out []rbacv1.PolicyRule
+		for _, r := range rules {
+			if slices.Equal(r.APIGroups, []string{""}) &&
+				(slices.Equal(r.Resources, []string{"secrets"}) || slices.Equal(r.Resources, []string{"serviceaccounts"})) {
+				continue
+			}
+			out = append(out, r)
+		}
+		return out
+	}
+
+	baseCR := loadWatcherClusterRole(t)
+	patchCRBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "components", "no-secrets", "patch-clusterrole.yaml"))
+	if err != nil {
+		t.Fatalf("reading no-secrets/patch-clusterrole.yaml: %v", err)
+	}
+	var patchCR rbacv1.ClusterRole
+	if err := yaml.Unmarshal(patchCRBytes, &patchCR); err != nil {
+		t.Fatalf("parsing no-secrets/patch-clusterrole.yaml: %v", err)
+	}
+	wantCR := stripSecretsAndSAs(baseCR.Rules)
+	if len(patchCR.Rules) != len(wantCR) {
+		t.Fatalf("no-secrets ClusterRole rules count = %d, want %d", len(patchCR.Rules), len(wantCR))
+	}
+	for i := range wantCR {
+		if !slices.Equal(patchCR.Rules[i].APIGroups, wantCR[i].APIGroups) ||
+			!slices.Equal(patchCR.Rules[i].Resources, wantCR[i].Resources) ||
+			!slices.Equal(patchCR.Rules[i].Verbs, wantCR[i].Verbs) ||
+			!slices.Equal(patchCR.Rules[i].ResourceNames, wantCR[i].ResourceNames) {
+			t.Errorf("no-secrets ClusterRole rule[%d] = %+v, want %+v", i, patchCR.Rules[i], wantCR[i])
+		}
+	}
+
+	nsRoleBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "components", "scope-namespaced", "role-watcher.yaml"))
+	if err != nil {
+		t.Fatalf("reading scope-namespaced/role-watcher.yaml: %v", err)
+	}
+	var nsRole rbacv1.Role
+	if err := yaml.Unmarshal(nsRoleBytes, &nsRole); err != nil {
+		t.Fatalf("parsing scope-namespaced/role-watcher.yaml: %v", err)
+	}
+	patchRoleBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "components", "no-secrets", "patch-role.yaml"))
+	if err != nil {
+		t.Fatalf("reading no-secrets/patch-role.yaml: %v", err)
+	}
+	var patchRole rbacv1.Role
+	if err := yaml.Unmarshal(patchRoleBytes, &patchRole); err != nil {
+		t.Fatalf("parsing no-secrets/patch-role.yaml: %v", err)
+	}
+	wantRole := stripSecretsAndSAs(nsRole.Rules)
+	if len(patchRole.Rules) != len(wantRole) {
+		t.Fatalf("no-secrets Role rules count = %d, want %d", len(patchRole.Rules), len(wantRole))
+	}
+	for i := range wantRole {
+		if !slices.Equal(patchRole.Rules[i].APIGroups, wantRole[i].APIGroups) ||
+			!slices.Equal(patchRole.Rules[i].Resources, wantRole[i].Resources) ||
+			!slices.Equal(patchRole.Rules[i].Verbs, wantRole[i].Verbs) {
+			t.Errorf("no-secrets Role rule[%d] = %+v, want %+v", i, patchRole.Rules[i], wantRole[i])
+		}
+	}
+
+	for _, pair := range [][2]string{
+		{"deploy/base/12-clusterrole-watcher.yaml", "deploy/12-clusterrole-watcher.yaml"},
+		{"deploy/base/14-role-watcher-capacity.yaml", "deploy/14-role-watcher-capacity.yaml"},
+		{"deploy/base/51-deployment-watcher.yaml", "deploy/51-deployment-watcher.yaml"},
+		{"deploy/mcp/mcp.yaml", "deploy-mcp-gemini/mcp.yaml"},
+		{"deploy/mcp/gateway.yaml", "deploy-mcp-gemini/gateway.yaml"},
+	} {
+		canonicalPath := filepath.Join("..", "..", "..", filepath.FromSlash(pair[0]))
+		compatPath := filepath.Join("..", "..", "..", filepath.FromSlash(pair[1]))
+		info, err := os.Lstat(compatPath)
+		if err != nil {
+			t.Fatalf("stat compatibility copy %s: %v", pair[1], err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			t.Errorf("%s is a symlink; keep a regular file so raw GitHub fetches and core.symlinks=false clones get valid YAML", pair[1])
+		}
+		canonical, err := os.ReadFile(canonicalPath)
+		if err != nil {
+			t.Fatalf("reading %s: %v", pair[0], err)
+		}
+		compat, err := os.ReadFile(compatPath)
+		if err != nil {
+			t.Fatalf("reading compatibility copy %s: %v", pair[1], err)
+		}
+		if string(canonical) != string(compat) {
+			t.Errorf("%s drifted from %s; keep compatibility copy byte-identical", pair[1], pair[0])
 		}
 	}
 }

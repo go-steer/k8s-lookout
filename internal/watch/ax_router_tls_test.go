@@ -16,13 +16,13 @@ package watch
 
 import (
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	"sigs.k8s.io/yaml"
 
 	"github.com/go-steer/k8s-lookout/internal/axsink"
@@ -142,69 +142,42 @@ func TestAXRouterHTTPClient_PlainAndOneWayModesReadNoFiles(t *testing.T) {
 	}
 }
 
-// deploy-ax/ is the in-repo example of the ax sink. Its task template must
-// decode, and its two projected volumes must land where the --ax-router-*
-// defaults look, or the overlay ships a pod that crash-loops on a missing
-// credential bundle.
+// deploy/components/sink-ax/ (and its legacy deploy-ax/ alias) is the in-repo
+// example of the ax sink. Its task template must decode, and its two projected
+// volumes must land where the --ax-router-* defaults look, or the component
+// ships a pod that crash-loops on a missing credential bundle.
 func TestDeployAXOverlayMatchesTheRouterDefaults(t *testing.T) {
-	if _, err := loadAXTaskTemplate("../../deploy-ax/task.yaml"); err != nil {
-		t.Fatalf("deploy-ax/task.yaml: %v", err)
+	if _, err := loadAXTaskTemplate("../../deploy/components/sink-ax/task.yaml"); err != nil {
+		t.Fatalf("deploy/components/sink-ax/task.yaml: %v", err)
 	}
-	raw, err := os.ReadFile("../../deploy-ax/kustomization.yaml")
+	raw, err := os.ReadFile("../../deploy/components/sink-ax/patch-deployment.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var k struct {
-		Patches []struct {
-			Patch string `json:"patch"`
-		} `json:"patches"`
-	}
-	if err := yaml.Unmarshal(raw, &k); err != nil {
-		t.Fatal(err)
-	}
-	type volume struct {
-		Name      string `json:"name"`
-		MountPath string `json:"mountPath"`
-		Projected struct {
-			Sources []struct {
-				PodCertificate *struct {
-					SignerName           string `json:"signerName"`
-					CredentialBundlePath string `json:"credentialBundlePath"`
-				} `json:"podCertificate"`
-				ClusterTrustBundle *struct {
-					SignerName string `json:"signerName"`
-					Path       string `json:"path"`
-				} `json:"clusterTrustBundle"`
-			} `json:"sources"`
-		} `json:"projected"`
+	var dep appsv1.Deployment
+	if err := yaml.UnmarshalStrict(raw, &dep); err != nil {
+		t.Fatalf("parsing deploy/components/sink-ax/patch-deployment.yaml: %v", err)
 	}
 	mounts := map[string]string{} // volume name -> mountPath
-	files := map[string]string{}  // volume name -> projected file name
-	for _, p := range k.Patches {
-		var ops []struct {
-			Op    string          `json:"op"`
-			Path  string          `json:"path"`
-			Value json.RawMessage `json:"value"`
+	for _, c := range dep.Spec.Template.Spec.Containers {
+		if c.Name != "watcher" {
+			continue
 		}
-		if err := yaml.Unmarshal([]byte(p.Patch), &ops); err != nil {
-			t.Fatal(err)
+		for _, vm := range c.VolumeMounts {
+			mounts[vm.Name] = vm.MountPath
 		}
-		for _, op := range ops {
-			var v volume
-			switch {
-			case strings.HasSuffix(op.Path, "/volumeMounts/-"):
-				_ = json.Unmarshal(op.Value, &v)
-				mounts[v.Name] = v.MountPath
-			case strings.HasSuffix(op.Path, "/volumes/-"):
-				_ = json.Unmarshal(op.Value, &v)
-				for _, s := range v.Projected.Sources {
-					if pc := s.PodCertificate; pc != nil && pc.SignerName == "podidentity.podcert.ate.dev/identity" {
-						files[v.Name] = pc.CredentialBundlePath
-					}
-					if tb := s.ClusterTrustBundle; tb != nil && tb.SignerName == "servicedns.podcert.ate.dev/identity" {
-						files[v.Name] = tb.Path
-					}
-				}
+	}
+	files := map[string]string{} // volume name -> projected file name
+	for _, v := range dep.Spec.Template.Spec.Volumes {
+		if v.Projected == nil {
+			continue
+		}
+		for _, s := range v.Projected.Sources {
+			if pc := s.PodCertificate; pc != nil && pc.SignerName == "podidentity.podcert.ate.dev/identity" {
+				files[v.Name] = pc.CredentialBundlePath
+			}
+			if tb := s.ClusterTrustBundle; tb != nil && tb.SignerName != nil && *tb.SignerName == "servicedns.podcert.ate.dev/identity" {
+				files[v.Name] = tb.Path
 			}
 		}
 	}
@@ -216,7 +189,7 @@ func TestDeployAXOverlayMatchesTheRouterDefaults(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("deploy-ax mounts nothing at %s (mounts %v, projected files %v)", want, mounts, files)
+			t.Errorf("deploy/components/sink-ax mounts nothing at %s (mounts %v, projected files %v)", want, mounts, files)
 		}
 	}
 }

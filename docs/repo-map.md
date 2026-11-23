@@ -60,18 +60,10 @@ k8s-lookout/
 │   │                     #   rbac.go declares per-source RBAC rules
 │   └── store/            # sentinel-local SQLite: occurrences, graph history, records
 ├── skills/               # workflow skills + playbooks; references/ are GENERATED
-├── deploy/               # cluster-wide sentinel Kustomize base + Helm chart (deploy/chart) +
-│                         #   prometheus-operator/ ServiceMonitor: SA, read-only ClusterRole,
-│                         #   kube-system capacity Role, NetworkPolicy, Service, Deployment
-├── deploy-ax/            # sentinel overlay swapping --daemon-url for --sink=ax + Substrate mTLS
-├── deploy-mcp-gemini/    # standalone `lookout mcp` Gateway deployment for Gemini Enterprise
-│                         #   (per-caller Google OAuth + optional oauth/ generic-client component)
-├── deploy-mcp-gemini-gateway/ # deprecated compatibility alias re-exporting deploy-mcp-gemini/
-├── deploy-namespaced/    # namespace-scoped sentinel (--watch-scope=namespace: Role + node/PV read)
-├── deploy-namespaced-strict/  # Role-only namespace-scoped sentinel (no cluster-scoped grants)
-├── deploy-no-secrets/    # cluster-wide sentinel overlay without secrets/serviceaccounts list
-├── deploy-probe/         # opt-in privileged overlay adding pods/ephemeralcontainers + VAP for
-│                         #   `lookout net probe-from` (top-level: Kustomize forbids nested overlays)
+├── deploy/               # canonical deployments: base/ sentinel, composable components/*
+│                         #   (sink-ax, no-secrets, scope-namespaced, scope-namespaced-strict,
+│                         #   probe-from), mcp/ Gateway server, prometheus-operator/, and chart/
+├── deploy-*/             # DEPRECATED (#852): thin Kustomize compatibility aliases to deploy/*
 ├── dev/
 │   ├── ci/presubmits/    # the exact checks CI runs, individually invokable
 │   ├── drills/           # GKE/kind replay runbooks (node-failure, bad-deploy, memory-leak,
@@ -131,12 +123,38 @@ Violating any of these is a bug, not a test update
 | LKGH graph-snapshot format (magic + version byte + gzip body) | `pkg/graph/history.go` | `pkg/graph/history_test.go` (golden v1 blob, `TestRestore_V1Compat`) |
 | Sanitizer: no secret value on any surface | `pkg/emit/sanitize.go` | `pkg/emit/sanitize_test.go` golden fixtures (`pkg/emit/testdata/sanitize/`) — an unmasked credential fixture fails CI |
 | Exempt annotates, never drops: a covered finding is still emitted and counted, and the summary reports `exempt=<n>` | `pkg/exempt/`, `pkg/emit/writer.go` | `pkg/exempt/exempt_test.go`, `pkg/emit/exempt_test.go` (`TestExemptAnnotatesNeverDrops`) |
-| Shipped ClusterRole covers the enrichment read paths | `deploy/12-clusterrole-watcher.yaml` | `pkg/checks/state/rbac_test.go` parses the manifest against `LoadClusterListRequirements()` |
+| Shipped ClusterRole covers the enrichment read paths | `deploy/base/12-clusterrole-watcher.yaml` | `pkg/checks/state/rbac_test.go` parses the manifest against `LoadClusterListRequirements()` |
 | Command output schema ↔ declared metadata | each `pkg/checks/*` | `pkg/checks/checktest.VerifyContract` in every command's suite |
 | MCP response limit (`lookout mcp --max-response-bytes`, #747): a cut tool result loses whole finding lines only, keeps its summary line with `findings=` = lines returned, and says so in the envelope-owned `response_*` notes (`emit.ResponseNoteFields`); head kept unless the command declares `NewestLast`; the hint offers `since` only when the command declares `UsesSince` (#756); `k8s_list_clusters` is cut too, keeping scope lines and summary (#755) | `internal/mcpserver/response.go` | `internal/mcpserver/response_test.go` (`checktest.Verify` on every cut, both formats) + `pkg/checks/all/since_test.go` (`TestUsesSinceMatchesTheSource`: every `Scope.Since` read in `pkg/checks/**` maps to a command declaring `UsesSince`, and vice versa) |
 | Finding kinds ↔ the ledger each command declares (an emitted `kind=` must be declared, at a severity the declaration lists) | `Command.Kinds` in each `pkg/checks/*`; the glossary union in `pkg/checks/registry.go` (`KindGlossary`) | `pkg/checks/checktest.Verify` (every kind a test run produces) + `pkg/checks/all/kinds_test.go` (`TestEveryEmittedKindIsDeclared` resolves the kind at every emit site in `pkg/checks/**`, so a branch no fixture reaches cannot slip through) |
 | Every registered check reaches the binary and both doc generators | `pkg/checks/all/all.go` (the one blank-import list; the binary, `internal/sitedoc/gen`, `internal/skilldoc/gen`, and their drift tests import only it) | `pkg/checks/all/all_test.go` (`TestAllImportsEveryRegisteringPackage` walks `pkg/checks/**` for `checks.Register` calls) |
 | Bundle section identifiers/order across CLI and enrichment ("the enrichment bundle IS a bundle") | `pkg/checks/bundle/bundle.go` + `internal/watch/enrich.go` | `internal/watch/enrich_bundle_contract_test.go` (`TestBundleSectionContractFrozen`; pins both heads' `sections=` joins and both bodies' emission order) |
+
+## Deployment variants
+
+Every Kustomize bundle, `Component`, Helm chart, and deprecated compatibility alias carries its own `README.md` and appears in the directory ledger below (enforced against the live `deploy*` tree by `internal/sitedoc/deploy_variants_test.go` and `dev/tools/docs-lint`, and parity-checked by `dev/tools/verify-helm-parity`):
+
+| Directory | Kind | Helm equivalent | Purpose |
+| --- | --- | --- | --- |
+| [`deploy/`](../deploy/README.md) | Kustomize alias | default values | Backwards-compatible alias building `deploy/base/` |
+| [`deploy/base/`](../deploy/base/README.md) | Kustomize base | default values (`mode=watch`, `sink.type=core-agent`) | Cluster-wide `lookout watch` sentinel posting incidents to `core-agent` |
+| [`deploy/chart/`](../deploy/chart/README.md) | Helm chart | — | Parameterizes `deploy/base/`, all `deploy/components/*`, `sink.type=webhook`, and `mode=mcp` |
+| [`deploy/components/no-secrets/`](../deploy/components/no-secrets/README.md) | Kustomize `Component` | `rbac.secrets=false` | Withhold `secrets` & `serviceaccounts` `list` rules + `--enrich-lists=all,-secrets,-serviceaccounts` |
+| [`deploy/components/probe-from/`](../deploy/components/probe-from/README.md) | Kustomize `Component` | `rbac.probeFrom=true` | Opt-in privileged `pods/ephemeralcontainers` + `ValidatingAdmissionPolicy` for `net probe-from` |
+| [`deploy/components/scope-namespaced/`](../deploy/components/scope-namespaced/README.md) | Kustomize `Component` | `rbac.scope=namespace` | Namespace-scoped sentinel (`Role` per namespace + minimal node/PV `ClusterRole`) |
+| [`deploy/components/scope-namespaced-strict/`](../deploy/components/scope-namespaced-strict/README.md) | Kustomize `Component` | `rbac.scope=namespace` + `rbac.nodes=false` | Strictly namespaced `Role`-only sentinel (zero cluster-scoped or `kube-system` grants) |
+| [`deploy/components/sink-ax/`](../deploy/components/sink-ax/README.md) | Kustomize `Component` | `sink.type=ax` | Switch `lookout watch` to `--sink=ax` + task template `ConfigMap` + Substrate router mTLS |
+| [`deploy/mcp/`](../deploy/mcp/README.md) | Kustomize base | `mode=mcp` | Standalone `lookout mcp` Gateway deployment with per-caller Google OAuth |
+| [`deploy/mcp/domain/`](../deploy/mcp/domain/README.md) | Kustomize `Component` | `mcp.domain` | Propagate `ConfigMap/lookout-mcp` `data.DOMAIN` into `HTTPRoute` hostname |
+| [`deploy/mcp/oauth/`](../deploy/mcp/oauth/README.md) | Kustomize `Component` | `mode=mcp` + `mcp.oauth.enabled=true` | Enable `--oauth-issuer` and OAuth client/keyring `Secret` mounts for generic MCP clients |
+| [`deploy/prometheus-operator/`](../deploy/prometheus-operator/README.md) | Kustomize add-on | `serviceMonitor.enabled=true` | Optional `ServiceMonitor` scraping `lookout-watch-metrics` |
+| [`deploy-ax/`](../deploy-ax/README.md) | Deprecated alias | `sink.type=ax` | Compatibility alias composing `deploy/base` + `deploy/components/sink-ax` |
+| [`deploy-mcp-gemini/`](../deploy-mcp-gemini/README.md) | Deprecated alias | `mode=mcp` | Compatibility alias building `deploy/mcp/` (plus `domain/` and `oauth/` component aliases) |
+| [`deploy-mcp-gemini-gateway/`](../deploy-mcp-gemini-gateway/README.md) | Deprecated alias | `mode=mcp` | Compatibility alias building `deploy/mcp/` |
+| [`deploy-namespaced/`](../deploy-namespaced/README.md) | Deprecated alias | `rbac.scope=namespace` | Compatibility alias composing `deploy/base` + `deploy/components/scope-namespaced` |
+| [`deploy-namespaced-strict/`](../deploy-namespaced-strict/README.md) | Deprecated alias | `rbac.scope=namespace` + `rbac.nodes=false` | Compatibility alias composing `deploy/base` + `deploy/components/scope-namespaced-strict` |
+| [`deploy-no-secrets/`](../deploy-no-secrets/README.md) | Deprecated alias | `rbac.secrets=false` | Compatibility alias composing `deploy/base` + `deploy/components/no-secrets` |
+| [`deploy-probe/`](../deploy-probe/README.md) | Deprecated alias | `rbac.probeFrom=true` | Compatibility alias composing `deploy/base` + `deploy/components/probe-from` |
 
 ## Provider boundary and build tags
 

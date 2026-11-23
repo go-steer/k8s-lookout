@@ -49,7 +49,7 @@ func shippedGuard(t testing.TB) (*admissionv1.ValidatingAdmissionPolicy, *admiss
 }
 
 func loadShippedGuard() (*admissionv1.ValidatingAdmissionPolicy, *admissionv1.ValidatingAdmissionPolicyBinding, error) {
-	raw, err := os.ReadFile("../../../deploy-probe/probe-from.yaml")
+	raw, err := os.ReadFile("../../../deploy/components/probe-from/probe-from.yaml")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -74,7 +74,7 @@ func loadShippedGuard() (*admissionv1.ValidatingAdmissionPolicy, *admissionv1.Va
 		}
 	}
 	if vap == nil || vapb == nil {
-		return nil, nil, errorString("deploy-probe/probe-from.yaml lacks the policy or its binding")
+		return nil, nil, errorString("deploy/components/probe-from/probe-from.yaml lacks the policy or its binding")
 	}
 	return vap, vapb, nil
 }

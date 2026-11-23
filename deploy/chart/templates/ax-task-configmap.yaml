@@ -1,0 +1,13 @@
+{{- if and (not (include "lookout.mcpMode" .)) (eq (include "lookout.sinkType" .) "ax") (not .Values.sink.ax.existingTaskConfigMap) }}
+# SOURCE OF TRUTH: deploy/components/sink-ax/task.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lookout.axTaskConfigMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lookout.provenanceLabels" . | nindent 4 }}
+data:
+  task.yaml: |
+{{ .Values.sink.ax.taskTemplate | indent 4 }}
+{{- end }}

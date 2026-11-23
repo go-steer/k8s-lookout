@@ -1,7 +1,34 @@
-# SOURCE OF TRUTH: deploy/51-deployment-watcher.yaml, which carries the
-# rationale for every decision reproduced here — why the sentinel is a
-# separate Deployment rather than a daemon sidecar, what the image
-# flavors differ in, and why `args` pins what it pins.
+{{- if not (include "lookout.mcpMode" .) }}
+{{- $sinkType := include "lookout.sinkType" . -}}
+{{- $dryRun := false -}}
+{{- $hasSink := false -}}
+{{- $hasAXServer := false -}}
+{{- $hasAXTemplate := false -}}
+{{- $hasAXHTTPRouter := false -}}
+{{- $hasAXRouterCredBundle := false -}}
+{{- $hasSinkURL := false -}}
+{{- $hasSinkTokenEnv := false -}}
+{{- $selected := false -}}
+{{- range (concat .Values.args .Values.extraArgs) -}}
+{{- if eq . "--dry-run" }}{{ $dryRun = true }}{{ end -}}
+{{- if hasPrefix "--sink=" . }}{{ $hasSink = true }}{{ end -}}
+{{- if hasPrefix "--ax-server=" . }}{{ $hasAXServer = true }}{{ end -}}
+{{- if hasPrefix "--ax-task-template=" . }}{{ $hasAXTemplate = true }}{{ end -}}
+{{- if hasPrefix "--ax-router-url=http://" . }}{{ $hasAXHTTPRouter = true }}{{ end -}}
+{{- if hasPrefix "--ax-router-credential-bundle=" . }}{{ $hasAXRouterCredBundle = true }}{{ end -}}
+{{- if hasPrefix "--sink-url=" . }}{{ $hasSinkURL = true }}{{ end -}}
+{{- if hasPrefix "--sink-token-env=" . }}{{ $hasSinkTokenEnv = true }}{{ end -}}
+{{- if hasPrefix "--enrich-lists" . }}{{ $selected = true }}{{ end -}}
+{{- end -}}
+{{- if and (eq $sinkType "webhook") (not .Values.sink.webhook.url) (not $hasSinkURL) (not $dryRun) -}}
+{{- fail "sink.webhook.url is required when sink.type=webhook (unless --sink-url or --dry-run is set)" -}}
+{{- end -}}
+{{- if and (eq $sinkType "ax") (not .Values.sink.ax.routerMTLS) (not $hasAXHTTPRouter) (not $hasAXRouterCredBundle) (not $dryRun) -}}
+{{- fail "sink.ax.routerMTLS=false omits the router mTLS volumes; pass --ax-router-url=http://... (Substrate v0.5) or --ax-router-credential-bundle= in args/extraArgs, or keep sink.ax.routerMTLS=true" -}}
+{{- end -}}
+# SOURCE OF TRUTH: deploy/base/51-deployment-watcher.yaml (and
+# deploy/components/sink-ax/ when sink.type=ax), held in step by
+# dev/tools/verify-helm-parity.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,14 +38,6 @@ metadata:
     {{- include "lookout.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
-  # Recreate, not the default RollingUpdate: with replicas: 1 a rolling
-  # update starts the new pod before terminating the old one, so every
-  # rollout briefly runs two sentinels watching the same cluster and
-  # double-emitting every signal. A gap in coverage is recoverable;
-  # duplicate incidents are noise someone has to triage. This fixes the
-  # rollout case only — a node failure or a manual scale-up still
-  # produces two. Leader election is the real answer, tracked
-  # separately.
   strategy:
     type: Recreate
   selector:
@@ -52,41 +71,52 @@ spec:
         - name: watcher
           image: {{ include "lookout.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          # The image ENTRYPOINT is ["/lookout", "watch"], so these
-          # bare flags splice in behind `watch`.
           args:
-            {{- if include "lookout.namespaceScope" . }}
-            # rbac.scope=namespace (#407), as deploy-namespaced/ does it:
-            # the watch is scoped to rbac.namespaces, or the pod's own
-            # namespace when that is empty. Without the node grant
-            # (rbac.nodes=false, deploy-namespaced-strict/) --storm=on
-            # would refuse to start, so it becomes auto.
-            {{- $strict := not .Values.rbac.nodes }}
+            {{- $strict := and (include "lookout.namespaceScope" .) (not .Values.rbac.nodes) }}
+            {{- $replacedDaemonURL := false }}
             {{- range .Values.args }}
-            {{- if and $strict (eq . "--storm=on") }}
+            {{- if and (eq $sinkType "ax") (hasPrefix "--daemon-url=" .) }}
+            {{- $replacedDaemonURL = true }}
+            - --sink=ax
+            {{- else if and (eq $sinkType "webhook") (hasPrefix "--daemon-url=" .) }}
+            {{- $replacedDaemonURL = true }}
+            - --sink=webhook
+            {{- else if and (eq $sinkType "webhook") (or (hasPrefix "--token-env=" .) (hasPrefix "--mode=" .) (hasPrefix "--owner=" .) (hasPrefix "--target-session=" .)) }}
+            {{- else if and $strict (eq . "--storm=on") }}
             - --storm=auto
             {{- else }}
             - {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- if and (ne $sinkType "core-agent") (not $replacedDaemonURL) (not $hasSink) }}
+            - {{ printf "--sink=%s" $sinkType | quote }}
+            {{- end }}
+            {{- if eq $sinkType "ax" }}
+            {{- if not $hasAXServer }}
+            - {{ printf "--ax-server=%s" .Values.sink.ax.server | quote }}
+            {{- end }}
+            {{- if not $hasAXTemplate }}
+            - "--ax-task-template=/etc/lookout/ax/task.yaml"
+            {{- end }}
+            {{- end }}
+            {{- if eq $sinkType "webhook" }}
+            {{- if and .Values.sink.webhook.url (not $hasSinkURL) }}
+            - {{ printf "--sink-url=%s" .Values.sink.webhook.url | quote }}
+            {{- end }}
+            {{- if and .Values.sink.webhook.tokenSecretName (not $hasSinkTokenEnv) }}
+            - {{ printf "--sink-token-env=%s" .Values.sink.webhook.tokenEnvVar | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if include "lookout.namespaceScope" . }}
             - --watch-scope=namespace
             {{- if .Values.rbac.namespaces }}
             - --namespace={{ join "," .Values.rbac.namespaces }}
             {{- else }}
             - --namespace=$(POD_NAMESPACE)
             {{- end }}
-            {{- else }}
-            {{- toYaml .Values.args | nindent 12 }}
             {{- end }}
-            {{- if not .Values.rbac.secrets }}
-            {{- $selected := false }}
-            {{- range .Values.args }}{{ if hasPrefix "--enrich-lists" . }}{{ $selected = true }}{{ end }}{{ end }}
-            {{- if not $selected }}
-            # rbac.secrets=false (#149): never ask for what the
-            # ClusterRole no longer grants — deploy-no-secrets/ adds
-            # the same flag.
+            {{- if and (not .Values.rbac.secrets) (not $selected) }}
             - --enrich-lists=all,-secrets,-serviceaccounts
-            {{- end }}
             {{- end }}
             {{- range .Values.extraArgs }}
             - {{ . | quote }}
@@ -98,15 +128,36 @@ spec:
           volumeMounts:
             - name: lookout-data
               mountPath: /var/lib/lookout
+            {{- if eq $sinkType "ax" }}
+            - name: ax-task
+              mountPath: /etc/lookout/ax
+              readOnly: true
+            {{- if .Values.sink.ax.routerMTLS }}
+            - name: podidentity
+              mountPath: /run/podidentity.podcert.ate.dev
+              readOnly: true
+            - name: servicedns-ca
+              mountPath: /run/servicedns-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
+            {{- if ne $sinkType "webhook" }}
             - name: {{ .Values.daemonToken.envVar }}
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.daemonToken.secretName }}
                   key: {{ .Values.daemonToken.secretKey }}
+            {{- else if .Values.sink.webhook.tokenSecretName }}
+            - name: {{ .Values.sink.webhook.tokenEnvVar }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sink.webhook.tokenSecretName }}
+                  key: {{ .Values.sink.webhook.tokenSecretKey }}
+            {{- end }}
             {{- with .Values.goMemLimit }}
             - name: GOMEMLIMIT
               value: {{ . | quote }}
@@ -144,6 +195,29 @@ spec:
         {{- else }}
           emptyDir: {}
         {{- end }}
+        {{- if eq $sinkType "ax" }}
+        - name: ax-task
+          configMap:
+            name: {{ include "lookout.axTaskConfigMapName" . }}
+        {{- if .Values.sink.ax.routerMTLS }}
+        - name: podidentity
+          projected:
+            sources:
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
+        - name: servicedns-ca
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: trust-bundle.pem
+        {{- end }}
+        {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -163,3 +237,4 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}

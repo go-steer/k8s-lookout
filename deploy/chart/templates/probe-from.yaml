@@ -1,4 +1,4 @@
-{{- if .Values.rbac.probeFrom }}
+{{- if and (not (include "lookout.mcpMode" .)) .Values.rbac.probeFrom }}
 # SOURCE OF TRUTH: deploy-probe/probe-from.yaml — held to it by
 # dev/tools/verify-helm-parity (helm template --set rbac.probeFrom=true
 # == kustomize build deploy-probe/).

@@ -1,4 +1,4 @@
-{{- if and .Values.rbac.create (not (include "lookout.namespaceScope" .)) }}
+{{- if and (not (include "lookout.mcpMode" .)) .Values.rbac.create (not (include "lookout.namespaceScope" .)) }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

@@ -19,17 +19,46 @@ limitations under the License.
 {{- end -}}
 
 {{/*
-The standard fullname helper, which matters here for a specific reason:
-the documented install is `helm install lookout-watch`, and because
-that release name already contains the chart name, fullname resolves to
-`lookout-watch` — the exact resource names in deploy/*.yaml. That is
-what lets dev/tools/verify-helm-parity diff the two renders instead of
-comparing them by eye.
+Validated operating mode: "watch" (default) or "mcp".
+*/}}
+{{- define "lookout.mode" -}}
+{{- $mode := default "watch" .Values.mode -}}
+{{- if and (ne $mode "watch") (ne $mode "mcp") -}}
+{{- fail (printf "mode must be watch or mcp (got %q)" $mode) -}}
+{{- end -}}
+{{- $mode -}}
+{{- end -}}
 
-Two of the resources this names are CLUSTER-scoped (the ClusterRole and
-its binding), so a second release in the same cluster under a different
-name gets its own; a second release under the SAME name would collide,
-which is the ordinary Helm behaviour and the ordinary Helm error.
+{{- define "lookout.mcpMode" -}}
+{{- if eq (include "lookout.mode" .) "mcp" -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+Validated sink.type for watch mode: "core-agent" (default), "webhook", or "ax".
+*/}}
+{{- define "lookout.sinkType" -}}
+{{- $sink := default "core-agent" .Values.sink.type -}}
+{{- if and (ne $sink "core-agent") (ne $sink "webhook") (ne $sink "ax") -}}
+{{- fail (printf "sink.type must be core-agent, webhook or ax (got %q)" $sink) -}}
+{{- end -}}
+{{- $sink -}}
+{{- end -}}
+
+{{- define "lookout.component" -}}
+{{- if include "lookout.mcpMode" . -}}
+mcp
+{{- else -}}
+watcher
+{{- end -}}
+{{- end -}}
+
+{{/*
+The standard fullname helper: `helm install lookout-watch` resolves to
+`lookout-watch` and `helm install lookout-mcp --set mode=mcp` resolves to
+`lookout-mcp`, matching the raw Kustomize object names so
+dev/tools/verify-helm-parity can diff them directly.
 */}}
 {{- define "lookout.fullname" -}}
 {{- if .Values.fullnameOverride -}}
@@ -46,28 +75,32 @@ which is the ordinary Helm behaviour and the ordinary Helm error.
 
 {{/*
 Selector labels. Immutable on a Deployment once applied, so these are
-deliberately the two the shipped manifests use and nothing else — a
-chart that folds `app.kubernetes.io/instance` in here cannot be renamed
-and cannot be migrated onto from the raw manifests without deleting the
-Deployment first.
+deliberately the two the shipped manifests use and nothing else.
 */}}
 {{- define "lookout.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "lookout.fullname" . }}
-app.kubernetes.io/component: watcher
+app.kubernetes.io/component: {{ include "lookout.component" . }}
 {{- end -}}
 
 {{/*
-Object labels: the selector labels plus Helm's provenance. The extra
-keys are metadata only and never reach a selector.
+Helm provenance labels only (for objects whose raw Kustomize source carries
+no app.kubernetes.io/name or component labels).
 */}}
-{{- define "lookout.labels" -}}
-{{ include "lookout.selectorLabels" . }}
+{{- define "lookout.provenanceLabels" -}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- with .Values.commonLabels }}
 {{ toYaml . }}
 {{- end }}
+{{- end -}}
+
+{{/*
+Object labels: the selector labels plus Helm's provenance.
+*/}}
+{{- define "lookout.labels" -}}
+{{ include "lookout.selectorLabels" . }}
+{{ include "lookout.provenanceLabels" . }}
 {{- end -}}
 
 {{- define "lookout.serviceAccountName" -}}
@@ -79,15 +112,28 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end -}}
 
 {{/*
+Name of the AX task template ConfigMap when sink.type=ax.
+*/}}
+{{- define "lookout.axTaskConfigMapName" -}}
+{{- if .Values.sink.ax.existingTaskConfigMap -}}
+{{- .Values.sink.ax.existingTaskConfigMap -}}
+{{- else -}}
+{{- printf "%s-ax-task-%s" (trimSuffix "-watch" (include "lookout.fullname" .)) (sha256sum .Values.sink.ax.taskTemplate | trunc 10) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 The image reference. `image.tag` wins; otherwise appVersion, with
-`image.flavor` appended as a suffix so switching to the GKE build is
-one value rather than a version string the operator has to keep in step
-with the chart.
+`image.flavor` (or `mcp.imageFlavor` in mcp mode) appended as a suffix.
 */}}
 {{- define "lookout.image" -}}
 {{- $tag := default .Chart.AppVersion .Values.image.tag -}}
-{{- if and .Values.image.flavor (not .Values.image.tag) -}}
-{{- $tag = printf "%s-%s" $tag .Values.image.flavor -}}
+{{- $flavor := .Values.image.flavor -}}
+{{- if and (not $flavor) (include "lookout.mcpMode" .) -}}
+{{- $flavor = .Values.mcp.imageFlavor -}}
+{{- end -}}
+{{- if and $flavor (not .Values.image.tag) -}}
+{{- $tag = printf "%s-%s" $tag $flavor -}}
 {{- end -}}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
 {{- end -}}

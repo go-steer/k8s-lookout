@@ -1,0 +1,285 @@
+{{- if include "lookout.mcpMode" . }}
+{{- if ne (include "lookout.sinkType" .) "core-agent" }}
+{{- fail "sink.type is a watch-mode setting and cannot be combined with mode=mcp" }}
+{{- end }}
+{{- if or .Values.rbac.probeFrom (ne (default "cluster" .Values.rbac.scope) "cluster") (not .Values.rbac.secrets) }}
+{{- fail "rbac.{probeFrom,scope,secrets} are watch-mode RBAC settings; mode=mcp deploys ServiceAccount lookout-mcp with zero cluster RBAC (caller-token mode)" }}
+{{- end }}
+{{- if or .Values.serviceMonitor.enabled .Values.persistence.enabled }}
+{{- fail "serviceMonitor.enabled and persistence.enabled are watch-mode settings and cannot be combined with mode=mcp" }}
+{{- end }}
+# SOURCE OF TRUTH: deploy/mcp/{config,mcp,gateway}.yaml and
+# deploy/mcp/oauth/ — held to them by dev/tools/verify-helm-parity.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lookout.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+data:
+  DOMAIN: {{ .Values.mcp.domain | quote }}
+  GOOGLE_CLIENT_ID: {{ .Values.mcp.googleClientId | quote }}
+  GOOGLE_ALLOW: {{ .Values.mcp.googleAllow | quote }}
+  GOOGLE_ALLOW_WRITE: {{ .Values.mcp.googleAllowWrite | quote }}
+  GOOGLE_GROUPS_SERVICE_ACCOUNT: {{ .Values.mcp.googleGroupsServiceAccount | quote }}
+  CLUSTERS_FROM: {{ .Values.mcp.clustersFrom | quote }}
+  OAUTH_CUSTODY: {{ .Values.mcp.oauthCustody | quote }}
+  OAUTH_VAULT_AUTH_PROVIDER: {{ .Values.mcp.oauthVaultAuthProvider | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lookout.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.mcp.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  minReadySeconds: {{ .Values.mcp.minReadySeconds }}
+  selector:
+    matchLabels:
+      {{- include "lookout.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lookout.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "lookout.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.mcp.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
+      {{- else }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              {{- include "lookout.selectorLabels" . | nindent 14 }}
+          matchLabelKeys:
+            - pod-template-hash
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mcp
+          image: {{ include "lookout.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "lookout.fullname" . }}
+          {{- with .Values.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command: ["/lookout", "mcp"]
+          args:
+            {{- range .Values.mcp.args }}
+            - {{ . | quote }}
+            {{- end }}
+            {{- if .Values.mcp.oauth.enabled }}
+            - "--oauth-issuer=https://$(DOMAIN)"
+            - "--google-client-secret-file=/etc/lookout/oauth/client/client.json"
+            - "--oauth-keys-file=/etc/lookout/oauth/keys/keyring"
+            - "--oauth-custody=$(OAUTH_CUSTODY)"
+            - "--oauth-vault-auth-provider=$(OAUTH_VAULT_AUTH_PROVIDER)"
+            - "--oauth-open-registration"
+            {{- end }}
+            {{- range .Values.mcp.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          {{- if or .Values.mcp.oauth.enabled .Values.extraVolumeMounts }}
+          volumeMounts:
+            {{- if .Values.mcp.oauth.enabled }}
+            - name: oauth-client
+              mountPath: /etc/lookout/oauth/client
+              readOnly: true
+            - name: oauth-keys
+              mountPath: /etc/lookout/oauth/keys
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          ports:
+            - name: mcp
+              containerPort: {{ .Values.mcp.listenPort }}
+              protocol: TCP
+          {{- with .Values.mcp.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /.well-known/oauth-protected-resource/mcp
+              port: mcp
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /.well-known/oauth-protected-resource/mcp
+              port: mcp
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ .Values.mcp.preStopSleepSeconds }}
+      {{- if or .Values.mcp.oauth.enabled .Values.extraVolumes }}
+      volumes:
+        {{- if .Values.mcp.oauth.enabled }}
+        - name: oauth-client
+          secret:
+            secretName: {{ .Values.mcp.oauth.clientSecretName }}
+        - name: oauth-keys
+          secret:
+            secretName: {{ .Values.mcp.oauth.keysSecretName }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.mcp.service.create }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lookout.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+    {{- with .Values.mcp.service.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.mcp.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.mcp.service.type }}
+  selector:
+    {{- include "lookout.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.mcp.service.port }}
+      targetPort: mcp
+      protocol: TCP
+{{- end }}
+{{- if .Values.mcp.gateway.enabled }}
+{{- if not .Values.mcp.service.create }}
+{{- fail "mcp.gateway.enabled requires mcp.service.create" }}
+{{- end }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ include "lookout.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+  annotations:
+    networking.gke.io/certmap: {{ .Values.mcp.gateway.certMap }}
+spec:
+  gatewayClassName: {{ .Values.mcp.gateway.gatewayClassName }}
+  addresses:
+    - type: NamedAddress
+      value: {{ .Values.mcp.gateway.namedAddress }}
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "lookout.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lookout.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ include "lookout.fullname" . }}
+  hostnames:
+    - {{ .Values.mcp.domain | quote }}
+  rules:
+    - backendRefs:
+        - name: {{ include "lookout.fullname" . }}
+          port: {{ .Values.mcp.service.port }}
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: {{ include "lookout.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lookout.provenanceLabels" . | nindent 4 }}
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: {{ .Values.mcp.listenPort }}
+        requestPath: /.well-known/oauth-protected-resource/mcp
+  targetRef:
+    group: ""
+    kind: Service
+    name: {{ include "lookout.fullname" . }}
+---
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: {{ include "lookout.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lookout.provenanceLabels" . | nindent 4 }}
+spec:
+  default:
+    timeoutSec: {{ .Values.mcp.gateway.backendTimeoutSec }}
+  targetRef:
+    group: ""
+    kind: Service
+    name: {{ include "lookout.fullname" . }}
+{{- end }}
+{{- end }}

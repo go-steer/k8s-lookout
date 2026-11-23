@@ -1,0 +1,26 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Local-config marker so `scope-namespaced` fails `kustomize build` closed
+# if an operator lists `no-secrets` BEFORE `scope-namespaced` (or
+# `scope-namespaced-strict`), which would otherwise leave `secrets: list`
+# granted on `Role/lookout-watch` (#852).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lookout-component-no-secrets
+  annotations:
+    config.kubernetes.io/local-config: "true"
+data:
+  order: scope-before-no-secrets
