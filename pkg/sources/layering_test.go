@@ -12,78 +12,52 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package sources
+package sources_test
 
 import (
+	"context"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
+
+	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/go-steer/k8s-lookout/pkg/engine"
+	"github.com/go-steer/k8s-lookout/pkg/kube"
+	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
 )
 
 const modulePath = "github.com/go-steer/k8s-lookout"
 
 // layeringRules are the import-graph invariants of the repo: which
-// packages may reach which. They are one Go compiler short of being
-// enforced — everything here is the same module, so nothing but this
-// test stops `pkg/sources/rollout` importing `internal/watch` and
-// welding the sources to the sentinel forever.
-//
-// docs/leeway-design.md §2.4 names four disciplines the standalone
-// binary depends on and observes that they are "cheap to keep working
-// and expensive to retrofit". Two of them are import-graph properties:
-// discipline 1 (pkg/leeway never reaches client-go) and discipline 4
-// (sources import pkg/* only). This is where they stop being
-// conventions. The other two — informers and the meter passed in, not
-// built in — are API shape, not import graph, and cmd/leeway compiling
-// is what checks those.
+// packages may reach which. Everything here lives in one Go module, so
+// nothing in the compiler stops `pkg/sources/rollout` importing
+// `internal/watch` or `pkg/store` and welding the sources to the
+// sentinel's runner or persistence layer.
 //
 // Each rule is checked against the TRANSITIVE closure, not the offending
-// package's own import block. A direct-import check is trivially
-// satisfiable by accident: one innocuous helper that itself imports the
-// sentinel would put the whole thing back on the path while every file
-// in sight still looked clean.
+// package's own import block.
 var layeringRules = []struct {
-	// name is what the failure is called, not what it does.
-	name string
-	// pattern is the `go list` pattern for the packages under the rule.
-	pattern string
-	// forbidden are import-path prefixes those packages must not reach.
+	name      string
+	pattern   string
 	forbidden []string
-	// why is printed on failure. A layering test that says only "this is
-	// forbidden" gets the rule deleted by the next person who needs the
-	// import; one that says what breaks gets the design reconsidered.
-	why string
+	why       string
 }{
 	{
 		name:      "pkg/... never reaches internal/...",
 		pattern:   modulePath + "/pkg/...",
 		forbidden: []string{modulePath + "/internal"},
-		why: "§2.4 discipline 4: the sources and the engine are the embeddable half of this repo — " +
-			"cmd/leeway runs them, and #416 anticipates pkg/leeway being vendored somewhere that is not " +
-			"lookout at all. internal/ is the sentinel: its inject path, its store, its flag surface. One " +
-			"import from pkg/ into it makes every one of those a transitive dependency of the subsystem, " +
-			"and Go's internal/ rule will not catch it because this is all one module. The dependency runs " +
-			"one way: internal/watch wires up pkg/sources, never the reverse.",
+		why: "the sources and engine in pkg/ are the embeddable half of this repo. " +
+			"internal/ is the sentinel: its inject path, its flag surface, its runner. " +
+			"The dependency runs one way: internal/watch wires up pkg/sources, never the reverse.",
 	},
 	{
-		name:      "pkg/leeway stays pure",
-		pattern:   modulePath + "/pkg/leeway",
-		forbidden: []string{"k8s.io/client-go", "k8s.io/metrics", "k8s.io/kubectl"},
-		why: "§2.4 discipline 1 and NFR-10: the scoring engine is pure functions over plain structs, " +
-			"which is what lets it be tested without a cluster and embedded in something that has no " +
-			"client-go. Also checked inside the package by TestPkgLeeway_ImportsNothingThatTouchesACluster, " +
-			"which mutation-tests its own matcher; the duplication is deliberate, so that deleting one " +
-			"file does not silently retire the rule.",
-	},
-	{
-		name:      "cmd/leeway is the subsystem, not a second sentinel",
-		pattern:   modulePath + "/cmd/leeway",
-		forbidden: []string{modulePath + "/internal/watch", modulePath + "/pkg/store"},
-		why: "the standalone binary earns its keep by being the thing that FAILS when a discipline slips, " +
-			"and it cannot do that if it is allowed to reach for the sentinel the moment something is " +
-			"missing. Store-less is a supported posture (§9.1: current state is rebuildable, so a restart " +
-			"costs the in-flight dwell timers and nothing else), and reaching into internal/watch for the " +
-			"parts that are awkward to duplicate is how this stops being a standalone binary.",
+		name:      "pkg/sources/... stays store-free",
+		pattern:   modulePath + "/pkg/sources/...",
+		forbidden: []string{modulePath + "/pkg/store"},
+		why: "sources must run cleanly in store-less mode without importing SQLite persistence directly; " +
+			"internal/watch owns any optional store wiring.",
 	},
 }
 
@@ -104,16 +78,49 @@ func TestLayering_TheImportGraphMatchesTheDesign(t *testing.T) {
 	}
 }
 
-// closures maps each package matching pattern to its transitive import
-// closure. Per-package rather than one merged list so a failure names
-// the package that has to change, which is the difference between a
-// test somebody fixes and a test somebody deletes.
+// TestStandaloneSource_CallerSuppliedFactoryAndNoStore verifies the API-shape
+// half of the layering contract (#842): an informer-backed source constructs,
+// syncs, and shuts down cleanly with a caller-supplied transforming informer
+// factory and no store or internal/watch runner.
+func TestStandaloneSource_CallerSuppliedFactoryAndNoStore(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	factory := kube.NewTransformingFactory(client)
+
+	src := rollout.New(client, rollout.DefaultConfig())
+	src.WithFactory(factory)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Pre-instantiate the shared informers and start the caller-owned factory
+	// before launching Run, matching standalone shared-factory callers.
+	_ = factory.Core().V1().Pods().Informer()
+	_ = factory.Apps().V1().Deployments().Informer()
+	_ = factory.Apps().V1().ReplicaSets().Informer()
+	_ = factory.Apps().V1().StatefulSets().Informer()
+	factory.Start(ctx.Done())
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- src.Run(ctx, func(engine.Signal) {})
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !src.HasSynced() {
+		if time.Now().After(deadline) {
+			t.Fatal("standalone source did not sync within 3s")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("standalone source Run returned error: %v", err)
+	}
+}
+
 func closures(t *testing.T, pattern string) map[string][]string {
 	t.Helper()
-	// Deliberately not skipped when `go` is missing, for the same reason
-	// the purity guard is not: a guard that quietly opts out is worse
-	// than no guard, because the repo keeps advertising a property
-	// nothing is checking.
 	out, err := exec.Command("go", "list", "-f", "{{.ImportPath}}\t{{join .Deps \" \"}}", pattern).CombinedOutput()
 	if err != nil {
 		t.Fatalf("go list %s: %v\n%s", pattern, err, out)
@@ -133,15 +140,10 @@ func closures(t *testing.T, pattern string) map[string][]string {
 	return got
 }
 
-// underPrefix reports whether dep is prefix or lives beneath it,
-// respecting path boundaries: "k8s.io/client-gopher" is not client-go.
 func underPrefix(dep, prefix string) bool {
 	return dep == prefix || strings.HasPrefix(dep, prefix+"/")
 }
 
-// TestUnderPrefix_RespectsPathBoundaries proves the matcher works, so a
-// typo in a rule's prefix cannot turn the guard above into a no-op that
-// passes forever.
 func TestUnderPrefix_RespectsPathBoundaries(t *testing.T) {
 	cases := []struct {
 		dep, prefix string
@@ -163,11 +165,6 @@ func TestUnderPrefix_RespectsPathBoundaries(t *testing.T) {
 	}
 }
 
-// TestLayeringRules_EveryRuleMatchesSomething is the other half of the
-// guard: a rule whose pattern has gone stale — a package renamed, a
-// directory moved — would pass silently forever while enforcing nothing.
-// closures() fatals on an empty match, so running each pattern once is
-// enough to prove every rule still has packages under it.
 func TestLayeringRules_EveryRuleMatchesSomething(t *testing.T) {
 	for _, rule := range layeringRules {
 		if len(rule.forbidden) == 0 {

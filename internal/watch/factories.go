@@ -27,8 +27,8 @@ import (
 
 // The runner's informer factories.
 //
-// What enters a cache is kube.Transform's business and lives in pkg/kube,
-// because cmd/leeway needs the identical trimming and may not import this
+// What enters a cache is kube.Transform's business and lives in pkg/kube so
+// standalone informer callers get the identical trimming without importing this
 // package (§2.4 discipline 4). What is in SCOPE is this file's business,
 // because only the sentinel has a namespace deny list.
 

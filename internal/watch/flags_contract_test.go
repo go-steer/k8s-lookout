@@ -117,8 +117,8 @@ func TestFlagSurfaceFrozen(t *testing.T) {
 // requires an explicit golden review (`UPDATE_GOLDEN=1 go test ./internal/watch -run TestFlagInventory`).
 func TestFlagInventory_GoldenContract(t *testing.T) {
 	inv := FlagInventory()
-	if len(inv) < 100 {
-		t.Fatalf("expected >=100 watch flags in FlagInventory(), got %d", len(inv))
+	if len(inv) < 95 {
+		t.Fatalf("expected >=95 watch flags in FlagInventory(), got %d", len(inv))
 	}
 
 	var b strings.Builder

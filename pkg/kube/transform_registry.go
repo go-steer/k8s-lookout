@@ -182,8 +182,7 @@ var sharedTransformRegistry = []fieldEntry{
 		Action: fieldStripped,
 		Why: "An ephemeral container has the same shape as a regular one, so " +
 			"`kubectl debug --env` writes literal secret values straight into the " +
-			"cache. The leeway design's S9 table did not cover ephemeral " +
-			"containers; stripping them closes the hole the other two strips leave.",
+			"cache; stripping them closes the hole the other two strips leave.",
 	},
 	{
 		Kind:   "Pod",
@@ -315,10 +314,13 @@ var sharedTransformRegistry = []fieldEntry{
 		Kind:   "Node",
 		Path:   "metadata.annotations",
 		Action: fieldStripped,
-		Why: "Filtered, not dropped: reduced to retainedNodeAnnotations. Node " +
-			"annotations are unbounded and carry large cloud-provider blobs. Any " +
-			"annotation a source depends on must be added to that set — see the " +
-			"metadata.annotations[ccc_priority_index] entry below.",
+		Why:    "Node annotations are unbounded and carry large cloud-provider blobs; no informer-reachable watch consumer reads any node annotation.",
+	},
+	{
+		Kind:   "Node",
+		Path:   "spec.taints",
+		Action: fieldStripped,
+		Why:    "Scheduling taints are read only by direct API-list read-path checks (delta, stab scaledown); no informer-reachable watch consumer reads them.",
 	},
 	{
 		Kind:   "Node",
@@ -354,23 +356,12 @@ var sharedTransformRegistry = []fieldEntry{
 	// -------------------------------------------------------------- Node: preserved
 	{
 		Kind:   "Node",
-		Path:   "metadata.annotations[ccc_priority_index]",
-		Action: fieldPreserved,
-		Why: "GKE records the provisioned compute-class priority here. It is " +
-			"unprefixed, undocumented and GKE-internal, so it looks exactly like " +
-			"the provider noise the annotation filter exists to drop — dropping it " +
-			"would silently disable preference-rank tracking with no error anywhere.",
-		Readers: []string{
-			"pkg/sources/compute-class — rank resolution, docs/leeway-design.md §7.7.2",
-		},
-	},
-	{
-		Kind:   "Node",
 		Path:   "status.conditions[Ready]",
 		Action: fieldPreserved,
-		Why:    "Node readiness gates whether a domain counts as available.",
+		Why:    "Node readiness drives objectstate.node_not_ready / node_flapping signals, clearance, and capacity forecast schedulability.",
 		Readers: []string{
-			"pkg/sources/topology-drift — domain inventory, docs/leeway-design.md §6.1",
+			"pkg/sources/objectstate — nodeNotReady / nodeFlapping / nodeclearance",
+			"pkg/sources/capacity/forecast.go — nodeSchedulable",
 		},
 	},
 	{
@@ -386,18 +377,9 @@ var sharedTransformRegistry = []fieldEntry{
 		Kind:   "Node",
 		Path:   "status.allocatable",
 		Action: fieldPreserved,
-		Why:    "Capacity weighting for node-group subjects.",
+		Why:    "Domain packable CPU and memory capacity for bin-packing exhaustion forecasts.",
 		Readers: []string{
-			"pkg/sources/topology-drift — capacity weighting, docs/leeway-design.md §6.1",
-		},
-	},
-	{
-		Kind:   "Node",
-		Path:   "spec.taints",
-		Action: fieldPreserved,
-		Why:    "Eligibility: a node whose taints a pod does not tolerate is not an eligible domain, and GKE auto-injects compute-class and GPU taints that make this non-obvious.",
-		Readers: []string{
-			"pkg/sources/topology-drift — eligible-domain computation, docs/leeway-design.md §7.1",
+			"pkg/sources/capacity/forecast.go — sampleCluster",
 		},
 	},
 }

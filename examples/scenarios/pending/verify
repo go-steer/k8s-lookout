@@ -22,7 +22,7 @@ echo "▸ verify pending"
 # on kind), k8s-event FailedScheduling must be held on failedscheduling_min_count
 # and must NOT open before capacity.pending-aged.
 await_inject pending 360 'capacity.pending' 'hog-'
-k8s_ev_count="$(leeway_wire_count pending 'kind=k8s-event' 'FailedScheduling' 'hog-')"
+k8s_ev_count="$(stub_wire_count pending 'kind=k8s-event' 'FailedScheduling' 'hog-')"
 if ((k8s_ev_count != 0)); then
   echo "  ✗ expected 0 k8s-event FailedScheduling opens before capacity.pending-aged, got $k8s_ev_count" >&2
   exit 1

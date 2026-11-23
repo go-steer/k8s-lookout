@@ -23,10 +23,6 @@
 # correlation keep working. Without it they are skipped at startup;
 # deploy-namespaced-strict/ is that tier.
 #
-# PersistentVolumes remain granted during the #842 deprecation window so
-# explicit --sources=topology-drift callers continue to work until Phase 2
-# removes the deprecated leeway watch sources.
-#
 # What the sentinel never gets here: anything namespaced across the cluster.
 # Pods, Events and every other namespaced kind stay confined to the listed
 # namespaces by the Roles and by --watch-scope=namespace.

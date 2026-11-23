@@ -29,11 +29,9 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/go-steer/k8s-lookout/pkg/sources"
-	"github.com/go-steer/k8s-lookout/pkg/sources/computeclass"
 	"github.com/go-steer/k8s-lookout/pkg/sources/notifications"
 	"github.com/go-steer/k8s-lookout/pkg/sources/quota"
 	"github.com/go-steer/k8s-lookout/pkg/sources/tokenburn"
-	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 )
 
 // grantReviewer is a fake SSAR reviewer driven by a predicate:
@@ -111,16 +109,13 @@ func TestResolveSourcesAuto_FullGrants(t *testing.T) {
 	}
 }
 
-// The explicit-only trio and the deprecated in-tree leeway sources (#842)
-// must never enter the auto candidate set or autoCandidateAccess:
-// enabling the first three is a deployment decision (project tier, an
-// operator-created subscription, the paid cost stack), and the leeway pair
-// are slow-moving posture checks superseded by github.com/go-steer/leeway.
+// The explicit-only trio and the removed in-tree leeway sources (#842)
+// must never enter the auto candidate set or autoCandidateAccess.
 func TestAutoCandidatesExcludeExplicitOnlySources(t *testing.T) {
 	t.Parallel()
 	f := autoFlags(t)
 	access := autoCandidateAccess(f, fake.NewSimpleClientset())
-	for _, name := range []string{quota.Name, notifications.Name, tokenburn.Name, topologydrift.Name, computeclass.Name} {
+	for _, name := range []string{quota.Name, notifications.Name, tokenburn.Name, "topology-drift", "compute-class"} {
 		if slices.Contains(autoSourceNames, name) {
 			t.Errorf("source %q is an auto candidate; it must stay excluded from --sources=auto", name)
 		}
@@ -252,11 +247,11 @@ func TestResolveSourcesAuto_GatewayAPIAbsent(t *testing.T) {
 	}
 }
 
-// TestResolveSourcesAuto_ExcludesDeprecatedLeewaySources (#842): even when
+// TestResolveSourcesAuto_ExcludesRemovedLeewaySources (#842): even when
 // every RBAC grant is present and GKE's cloud.google.com/v1 ComputeClasses
 // CRD is served in discovery, --sources=auto never enables or probes
 // topology-drift or compute-class.
-func TestResolveSourcesAuto_ExcludesDeprecatedLeewaySources(t *testing.T) {
+func TestResolveSourcesAuto_ExcludesRemovedLeewaySources(t *testing.T) {
 	t.Parallel()
 	client := fake.NewSimpleClientset()
 	client.Resources = []*metav1.APIResourceList{
@@ -269,13 +264,13 @@ func TestResolveSourcesAuto_ExcludesDeprecatedLeewaySources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSourcesAuto: %v", err)
 	}
-	for _, deprecated := range []string{topologydrift.Name, computeclass.Name} {
-		if slices.Contains(res.enabled, deprecated) {
-			t.Errorf("%s must not be enabled under --sources=auto; enabled = %v", deprecated, res.enabled)
+	for _, removed := range []string{"topology-drift", "compute-class"} {
+		if slices.Contains(res.enabled, removed) {
+			t.Errorf("%s must not be enabled under --sources=auto; enabled = %v", removed, res.enabled)
 		}
 		for _, line := range res.lines {
-			if strings.Contains(line, deprecated) {
-				t.Errorf("startup summary should not probe or report deprecated source %s, got line: %q", deprecated, line)
+			if strings.Contains(line, removed) {
+				t.Errorf("startup summary should not probe or report removed source %s, got line: %q", removed, line)
 			}
 		}
 	}

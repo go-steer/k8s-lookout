@@ -137,20 +137,17 @@ func TestSharedTransform_PreservesLoadBearingFields(t *testing.T) {
 	}
 	n := node.(*corev1.Node)
 
-	if n.Annotations["ccc_priority_index"] == "" {
-		t.Error("the ccc_priority_index node annotation was dropped by the annotation filter; " +
-			"docs/leeway-design.md §7.7.2 resolves compute-class preference rank from it, and " +
-			"without it rank tracking silently reports nothing. Add it to retainedNodeAnnotations")
+	if len(n.Annotations) != 0 {
+		t.Errorf("node annotations survived (%v); no watch consumer reads node annotations", n.Annotations)
 	}
 	if !hasCondition(n.Status.Conditions, corev1.NodeReady) {
-		t.Error("the Ready condition was dropped by the condition filter; node readiness gates " +
-			"whether a domain counts as available")
+		t.Error("the Ready condition was dropped by the condition filter; objectstate and capacity/forecast read it")
 	}
 	if len(n.Status.Allocatable) == 0 {
-		t.Error("status.allocatable was stripped; capacity weighting for node-group subjects reads it")
+		t.Error("status.allocatable was stripped; capacity/forecast.go reads it")
 	}
-	if len(n.Spec.Taints) == 0 {
-		t.Error("spec.taints was stripped; eligible-domain computation reads it")
+	if len(n.Spec.Taints) != 0 {
+		t.Errorf("spec.taints survived (%v); no watch consumer reads node taints", n.Spec.Taints)
 	}
 }
 

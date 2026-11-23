@@ -34,8 +34,7 @@
 #               documented default fails closed for every operator who
 #               does not know to override it.
 #
-# Env (optional CI regression guards — off by default for human runs,
-# matching leeway-scale):
+# Env (optional CI regression guards — off by default for human runs):
 #   BENCH_TIMEOUT                  generous first-pass timeout (default 300s)
 #   BENCH_REQUIRE_DEFAULT_TIMEOUT  1 = fail on void stream, default-timeout
 #                                  failure, or under-scanned fleet pages

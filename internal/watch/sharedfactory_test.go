@@ -31,7 +31,6 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/ingress"
 	"github.com/go-steer/k8s-lookout/pkg/sources/k8sevents"
 	"github.com/go-steer/k8s-lookout/pkg/sources/objectstate"
-	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 )
 
 // watchCounter counts LIST+WATCH streams per resource on a fake
@@ -235,7 +234,7 @@ func TestK8sEventsResyncKeepsPrivateFactory(t *testing.T) {
 	wg.Wait()
 }
 
-// nodeReaders are the four consumers of the shared Nodes informer, each built
+// nodeReaders are the three consumers of the shared Nodes informer, each built
 // against a split factory pair. Any new one belongs here: the list is the
 // answer to "who has to know about the node carve-out".
 var nodeReaders = []struct {
@@ -252,12 +251,6 @@ var nodeReaders = []struct {
 	}},
 	{"object-state", func(client *fake.Clientset, f sharedFactories) (func(context.Context) error, func() bool) {
 		s := objectstate.New(client, objectstate.Config{TickInterval: time.Hour})
-		s.WithFactory(f.Namespaced)
-		s.WithNodeFactory(f.Cluster)
-		return runSourceFn(s), syncedFn(s)
-	}},
-	{"topology-drift", func(client *fake.Clientset, f sharedFactories) (func(context.Context) error, func() bool) {
-		s := topologydrift.New(client, topologydrift.Config{VerifyInterval: time.Hour})
 		s.WithFactory(f.Namespaced)
 		s.WithNodeFactory(f.Cluster)
 		return runSourceFn(s), syncedFn(s)
@@ -326,7 +319,7 @@ func TestSharedFactories_SplitEveryNodeReaderStartsIt(t *testing.T) {
 }
 
 // TestSharedFactories_SplitKeepsOneNodeWatch is the other half: splitting for
-// the node carve-out must not cost a stream. All four readers together still
+// the node carve-out must not cost a stream. All three readers together still
 // hold exactly one node watch and one pod watch between them — the §6.3
 // property, unchanged by the deny list.
 func TestSharedFactories_SplitKeepsOneNodeWatch(t *testing.T) {
@@ -351,14 +344,10 @@ func TestSharedFactories_SplitKeepsOneNodeWatch(t *testing.T) {
 	objSrc.WithFactory(factories.Namespaced)
 	objSrc.WithNodeFactory(factories.Cluster)
 
-	driftSrc := topologydrift.New(client, topologydrift.Config{VerifyInterval: time.Hour})
-	driftSrc.WithFactory(factories.Namespaced)
-	driftSrc.WithNodeFactory(factories.Cluster)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	all := []sources.Source{capSrc, objSrc, driftSrc}
+	all := []sources.Source{capSrc, objSrc}
 	var wg sync.WaitGroup
 	for _, s := range all {
 		wg.Add(1)
@@ -368,7 +357,7 @@ func TestSharedFactories_SplitKeepsOneNodeWatch(t *testing.T) {
 		}(s)
 	}
 
-	// The graph feed is the fourth node reader, and the one that takes the
+	// The graph feed is the third node reader, and the one that takes the
 	// factory pair rather than a WithNodeFactory setter.
 	feed := newGraphFeed(factories, nil)
 	wg.Add(1)
@@ -393,8 +382,8 @@ func TestSharedFactories_SplitKeepsOneNodeWatch(t *testing.T) {
 		resource string
 		readers  string
 	}{
-		{"nodes", "capacity, object-state, topology-drift, graph feed"},
-		{"pods", "capacity, object-state, topology-drift, graph feed"},
+		{"nodes", "capacity, object-state, graph feed"},
+		{"pods", "capacity, object-state, graph feed"},
 	} {
 		if got := counter.get(tc.resource); got != 1 {
 			t.Errorf("%s: %d watches opened, want exactly 1 — splitting the factory for the node carve-out must not cost a stream (readers: %s)",

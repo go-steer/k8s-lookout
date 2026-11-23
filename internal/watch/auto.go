@@ -59,11 +59,6 @@ const (
 // order: the portable reactive cluster sources — everything a
 // single-cluster deployment can support with RBAC grants alone (plus
 // metrics-server for saturation). Deliberately NOT candidates:
-//   - topology-drift, compute-class: deprecated in-tree leeway posture
-//     sources (#842; superseded by github.com/go-steer/leeway). Placement
-//     skew and ComputeClass fallback depth are slow-moving posture checks
-//     over Running/Ready pods rather than reactive incidents; both remain
-//     reachable via explicit --sources=... during the deprecation window.
 //   - quota: project tier (§11) — exactly one sentinel per GCP project
 //     enables it, on a provider-tagged image; that is a deployment
 //     decision, not a probeable cluster capability.

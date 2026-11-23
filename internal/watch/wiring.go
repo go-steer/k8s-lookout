@@ -30,7 +30,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -53,12 +52,10 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/graph"
 	"github.com/go-steer/k8s-lookout/pkg/inject"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
-	"github.com/go-steer/k8s-lookout/pkg/leeway"
 	"github.com/go-steer/k8s-lookout/pkg/memory/distill"
 	"github.com/go-steer/k8s-lookout/pkg/sources"
 	"github.com/go-steer/k8s-lookout/pkg/sources/autoscaling"
 	"github.com/go-steer/k8s-lookout/pkg/sources/capacity"
-	"github.com/go-steer/k8s-lookout/pkg/sources/computeclass"
 	"github.com/go-steer/k8s-lookout/pkg/sources/degradation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/expiry"
 	"github.com/go-steer/k8s-lookout/pkg/sources/gateway"
@@ -70,7 +67,6 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/rollout"
 	"github.com/go-steer/k8s-lookout/pkg/sources/saturation"
 	"github.com/go-steer/k8s-lookout/pkg/sources/tokenburn"
-	"github.com/go-steer/k8s-lookout/pkg/sources/topologydrift"
 	"github.com/go-steer/k8s-lookout/pkg/sources/workload"
 	"github.com/go-steer/k8s-lookout/pkg/store"
 )
@@ -94,9 +90,6 @@ func realMain(argv []string) error {
 	// Build identity first (#146): a running pod must identify its
 	// build from `kubectl logs` alone — version, commit, build date.
 	log.Printf("%s", version.String("lookout"))
-	if warning, ok := f.deprecationWarning(); ok {
-		log.Print(warning)
-	}
 
 	// OpenTelemetry init (internal/telemetry). Registers the W3C
 	// traceparent propagator globally (so otelhttp-wrapped outbound
@@ -466,8 +459,8 @@ func newRunner(f *flags, cluster string, sink inject.Sink, token string, reg *pr
 	}
 }
 
-// attachMeter gives the runner its OpenTelemetry MeterProvider (leeway
-// design §8.4, "instrument once, export twice").
+// attachMeter gives the runner its OpenTelemetry MeterProvider ("instrument
+// once, export twice": Prometheus pull bridge + optional OTLP push).
 //
 // Called once per runner from realMain, beside the trace provider it
 // mirrors, and for the same reason the metrics bundle is built once in
@@ -677,8 +670,8 @@ type runner struct {
 	excludes    *alertExcludeStore   // per-runner alert-excludes store, reused across supervisor restarts so last-good hot-reloaded rules survive
 	ready       *readiness           // process-global /readyz tracker; nil in tests that drive run directly
 
-	// meterProvider is this cluster's OpenTelemetry MeterProvider
-	// (leeway §8.4). Built once alongside the metrics bundle and for the
+	// meterProvider is this cluster's OpenTelemetry MeterProvider. Built
+	// once alongside the metrics bundle and for the
 	// same reason: its Prometheus bridge is a collector in the shared
 	// registry, and re-registering it on a supervisor restart would
 	// panic. Instruments ARE re-declared per run — the OTel API makes an
@@ -770,7 +763,7 @@ func (r *runner) run(ctx context.Context) error {
 		return err
 	}
 
-	bs, factories, cleanupSources, err := r.buildRunnerSources(ctx, f, restCfg, client, reviewer, occStore)
+	bs, factories, cleanupSources, err := r.buildRunnerSources(ctx, f, restCfg, client, reviewer)
 	if err != nil {
 		return err
 	}
@@ -1024,12 +1017,11 @@ func (r *runner) buildRunnerSources(
 	restCfg *rest.Config,
 	client kubernetes.Interface,
 	reviewer sources.AccessReviewer,
-	occStore *store.Store,
 ) (*builtSources, sharedFactories, func(), error) {
 	cleanup := func() {}
 	var err error
 	var dyn dynamic.Interface
-	if f.sourceEnabled(expiry.Name) || f.sourceEnabled(gateway.Name) || f.sourceEnabled(computeclass.Name) {
+	if f.sourceEnabled(expiry.Name) || f.sourceEnabled(gateway.Name) {
 		dyn, err = kube.BuildDynamicClientFromConfig(restCfg)
 		if err != nil {
 			return nil, sharedFactories{}, cleanup, err
@@ -1073,25 +1065,6 @@ func (r *runner) buildRunnerSources(
 	if bs.k8sevents != nil {
 		if err := enableEventOwners(ctx, bs.k8sevents, reviewer); err != nil {
 			return nil, sharedFactories{}, cleanup, err
-		}
-	}
-	if bs.topoDrift != nil {
-		bs.topoDrift.WithMeter(r.meter(topologydrift.MeterName))
-		if bs.rollout != nil {
-			bs.topoDrift.WithRolloutOracle(rolloutOracle(bs.rollout))
-			bs.topoDrift.WithRolloutEndOracle(rolloutEndOracle(bs.rollout))
-		}
-		if bs.capacity != nil {
-			bs.topoDrift.WithCapacityOracle(capacityOracle(bs.capacity))
-		}
-		if occStore != nil {
-			bs.topoDrift.WithStore(occStore, r.clusterName)
-		}
-	}
-	if bs.compClass != nil {
-		bs.compClass.WithMeter(r.meter(computeclass.MeterName))
-		if occStore != nil {
-			bs.compClass.WithStore(occStore, r.clusterName)
 		}
 	}
 	return bs, factories, cleanup, nil
@@ -1280,26 +1253,6 @@ func attachSharedFactories(bs *builtSources, factories sharedFactories) {
 		bs.capacity.WithFactory(ns)
 		bs.capacity.WithNodeFactory(factories.Cluster)
 	}
-	if bs.topoDrift != nil {
-		// Pods, nodes AND replicasets — all three already on this
-		// factory for the graph feed and the workload source, so leeway's
-		// §6.2 indexes cost no new LIST+WATCH stream. That is the whole
-		// argument for a default-on source that watches every pod in the
-		// cluster.
-		bs.topoDrift.WithFactory(ns)
-		bs.topoDrift.WithNodeFactory(factories.Cluster)
-	}
-	if bs.compClass != nil {
-		// Pods and nodes, both already on these factories — the §7.7
-		// pod-seconds are a join over two streams this process watches
-		// anyway, and the only watch the source adds for itself is the
-		// handful of ComputeClass objects, on its own dynamic factory. Its
-		// Event handler (the autoscaler verdicts behind the wedged rule,
-		// #532) shares this factory's one Event stream with k8s-events,
-		// capacity and ingress.
-		bs.compClass.WithFactory(ns)
-		bs.compClass.WithNodeFactory(factories.Cluster)
-	}
 }
 
 // eventOwnerAccess is what the k8s-events source's owner resolution
@@ -1366,8 +1319,8 @@ func enableEventOwners(ctx context.Context, src *k8sevents.Source, reviewer sour
 // walked up) or its incident was restored with the Deployment
 // ControllerRef the k8s-events source resolved, while live pods are
 // indexed by their ReplicaSet. Rides the shared factory's ReplicaSet informer
-// (rollout, topology-drift, the storm graph and k8s-events owner
-// resolution use the same one). Nil, with one line, when replicasets
+// (rollout, the storm graph and k8s-events owner resolution use the same one).
+// Nil, with one line, when replicasets
 // list/watch is denied: those incidents are judged as before.
 //
 // With deployments list/watch too (object-state and rollout already
@@ -1438,8 +1391,6 @@ type builtSources struct {
 	expiry      *expiry.Source
 	capacity    *capacity.Source
 	gateway     *gateway.Source
-	topoDrift   *topologydrift.Source
-	compClass   *computeclass.Source
 	quota       *quota.Source
 	notes       *notifications.Source
 	tokenBurn   *tokenburn.Source
@@ -1450,104 +1401,14 @@ type builtSources struct {
 // sources are returned as typed handles so setupRecovery can reuse
 // their informers/state as §7.4 clearance observers instead of
 // starting duplicates, and so storm mode can move them onto the
-// shared informer factory (§6.3). dyn may be nil unless the expiry
-// source is enabled (it reads cert-manager Certificates unstructured;
-// the caller builds it only when needed); metricsClient is only
-// required (non-nil) when the saturation source is enabled — its
-// metrics.k8s.io dimension rides a separate clientset. provider is
-// the §2 cloud boundary for the capacity source; nil is tolerated
-// (treated as cloud.NoProvider — explicit unavailability, §2).
-// daemonToken is the resolved --token-env bearer token, reused by the
-// token-burn source's cost-stack client (§3: same daemon, same auth
-// as the inject path); empty means authless.
-// rollingOutReporter is the half of *rollout.Source that rolloutOracle needs.
-// Narrow because it is the whole contract between the two subsystems, and
-// because a test of the adapter should not have to build a rollout source.
-type rollingOutReporter interface {
-	RollingOut() []rollout.WorkloadRef
-}
-
-// rolloutOracle adapts the rollout source's cluster-wide answer into the
-// SubjectRefs leeway keys on (docs/leeway-design.md §7.6).
-//
-// A kind the rollout source reports and leeway does not track is dropped
-// rather than passed through as a Custom subject: the set is only ever used to
-// look subjects up, so an entry nothing can match is a row in a map and
-// nothing else. Today the two kinds line up exactly; the guard is for the day
-// one of them grows a third.
-func rolloutOracle(src rollingOutReporter) topologydrift.RolloutOracle {
-	return func() []leeway.SubjectRef {
-		refs := src.RollingOut()
-		out := make([]leeway.SubjectRef, 0, len(refs))
-		for _, w := range refs {
-			kind := leeway.SubjectKind(w.Kind)
-			if kind != leeway.SubjectDeployment && kind != leeway.SubjectStatefulSet {
-				continue
-			}
-			out = append(out, leeway.SubjectRef{Kind: kind, Namespace: w.Namespace, Name: w.Name})
-		}
-		return out
-	}
-}
-
-// rolloutEndReporter is the half of *rollout.Source that rolloutEndOracle
-// needs. Separate from rollingOutReporter so each adapter's test builds only
-// the answer it is about.
-type rolloutEndReporter interface {
-	RolloutEnded() map[rollout.WorkloadRef]time.Time
-}
-
-// rolloutEndOracle adapts the rollout source's completion stamps into the
-// SubjectRefs leeway keys on (docs/leeway-design.md §8.5).
-//
-// Drops kinds leeway does not track, for rolloutOracle's reason: an entry
-// nothing can match is a row in a map and nothing else. Subjects with no
-// watched completion never reach here at all — the source omits them rather
-// than reporting the zero time, which is what keeps "we have not seen one"
-// from reading as a rollout that ended at the epoch.
-func rolloutEndOracle(src rolloutEndReporter) topologydrift.RolloutEndOracle {
-	return func() map[leeway.SubjectRef]time.Time {
-		ended := src.RolloutEnded()
-		out := make(map[leeway.SubjectRef]time.Time, len(ended))
-		for w, at := range ended {
-			kind := leeway.SubjectKind(w.Kind)
-			if kind != leeway.SubjectDeployment && kind != leeway.SubjectStatefulSet {
-				continue
-			}
-			out[leeway.SubjectRef{Kind: kind, Namespace: w.Namespace, Name: w.Name}] = at
-		}
-		return out
-	}
-}
-
-// unschedulableReporter is the half of *capacity.Source that capacityOracle
-// needs, narrow for the same reasons rollingOutReporter is.
-type unschedulableReporter interface {
-	Unschedulables() map[types.UID]capacity.Unschedulable
-}
-
-// capacityOracle adapts the capacity source's refused-pod table into the shape
-// leeway's attribution ladder reads (docs/leeway-design.md §8.5).
-//
-// A straight field-for-field copy, and deliberately no more than that: the
-// judgement about *why* a pod did not land belongs to the source that watched
-// it happen, and the point of the seam is that this function has no opinion to
-// add. It exists so neither package imports the other.
-func capacityOracle(src unschedulableReporter) topologydrift.CapacityOracle {
-	return func() map[types.UID]topologydrift.PendingFact {
-		pending := src.Unschedulables()
-		out := make(map[types.UID]topologydrift.PendingFact, len(pending))
-		for uid, p := range pending {
-			out[uid] = topologydrift.PendingFact{
-				Since:                p.Since,
-				Message:              p.Message,
-				InsufficientResource: p.InsufficientResource,
-			}
-		}
-		return out
-	}
-}
-
+// shared informer factory (§6.3). dyn may be nil unless the expiry or
+// gateway source is enabled; metricsClient is only required (non-nil)
+// when the saturation source is enabled — its metrics.k8s.io dimension
+// rides a separate clientset. provider is the §2 cloud boundary for
+// the capacity source; nil is tolerated (treated as cloud.NoProvider —
+// explicit unavailability, §2). daemonToken is the resolved --token-env
+// bearer token, reused by the token-burn source's cost-stack client
+// (§3: same daemon, same auth as the inject path); empty means authless.
 func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn dynamic.Interface, metricsClient metricsv.Interface, provider cloud.Provider) (*builtSources, error) {
 	bs := &builtSources{registry: sources.NewRegistry()}
 	for _, name := range splitCSV(f.sources) {
@@ -1628,91 +1489,6 @@ func buildSources(f *flags, daemonToken string, client kubernetes.Interface, dyn
 			cfg.Namespaces = f.scopeNamespaces()
 			bs.gateway = gateway.New(client, dyn, cfg)
 			src = bs.gateway
-		case topologydrift.Name:
-			// The leeway subsystem's placement half (docs/leeway-design.md).
-			// Portable — pods, nodes and replicasets, all already granted —
-			// so it auto-enables. It maintains the §6.2 indexes, exports the
-			// §8.4 counters, and raises the four §2.3 verdict kinds once a
-			// breach outlives the dwell; Tier C stays metrics-only unless
-			// --topology-tier-c-signals says otherwise.
-			// The error is dropped, not ignored: validate() already
-			// parsed this string and refused to start on a bad one, so
-			// a failure here is unreachable — and the fallback if it
-			// were reachable is nil, the assumed state, which is the
-			// honest one rather than a silent "no defaults".
-			clusterDefaults, _ := topologydrift.ParseClusterDefaults(f.topologyDefaults)
-			cfg := topologydrift.Config{
-				TopologyKeys:              topologyKeysFrom(f.topologyKeys),
-				ClusterDefaultConstraints: clusterDefaults,
-				PerDomainSeries:           f.topologyPerDomain,
-				PerDomainSeriesMinDrift:   f.topologyMinDrift,
-				PerDomainSeriesMaxKeys:    f.topologyMaxKeys,
-				// A pointer for the same reason as LearnBaselines below: the
-				// default is on, so the zero value cannot carry it.
-				PerDomainCollapseStates:    &f.topologyCollapse,
-				PerDomainNamespaces:        splitCSV(f.topologyDomainNS),
-				PerDomainExcludeNamespaces: splitCSV(f.topologyDomainNotNS),
-				Dwell:                      leeway.Dwell{For: f.topologyDwell},
-				CapacityRatioTrigger:       f.topologyCapacityRatio,
-				NodeGroupLabelKeys:         splitCSV(f.topologyNodeGroupKeys),
-				MaxNodeGroups:              f.topologyMaxNodeGroups,
-				DomainUnavailableKeys:      topologyKeysFrom(f.topologyDomainKeys),
-				TierCSignals:               f.topologyTierC,
-				LearnBaselines:             &f.topologyLearn,
-				// Only the two knobs the flags expose are set; every other
-				// field stays zero and Normalized() fills it from the §7.5
-				// defaults. Naming the defaults here as well would give the
-				// package two places to change them and one of them wrong.
-				Baselines: leeway.BaselineConfig{
-					HalfLife: f.topologyHalfLife,
-					K:        f.topologyBand,
-				},
-			}
-			bs.topoDrift = topologydrift.New(client, cfg)
-			// Optional, unlike the gateway source's dynamic client, which is
-			// a hard requirement checked above. A nil client here just means
-			// no LeewayPolicy watch, which is the same state as a cluster
-			// that never installed the CRD — the common case.
-			bs.topoDrift.WithDynamic(dyn)
-			bs.topoDrift.WithWatchNamespaces(f.scopeNamespaces())
-			src = bs.topoDrift
-		case computeclass.Name:
-			// The leeway subsystem's preference half (§7.7): which rung of
-			// a GKE custom compute class's priority ladder the estate is
-			// actually running on, weighted by time. It exports the §7.7.3
-			// counters and, since phase 6, raises the four §7.7.4 verdict
-			// kinds once one outlives the dwell — the condition has no
-			// failing pod and no failing Deployment, which is exactly why
-			// nothing else in k8s-lookout reports it. Tier C
-			// (leeway.rank_tier_unused) stays metrics-only unless
-			// --compute-class-tier-c-signals says otherwise.
-			//
-			// The dynamic client is a hard requirement, like gateway's:
-			// ComputeClass is a CRD and there is no typed client for it.
-			if dyn == nil {
-				return nil, fmt.Errorf("--sources: %s requires a dynamic client (programming error: buildSources called without one)", computeclass.Name)
-			}
-			cfg := computeclass.DefaultConfig()
-			cfg.Infer = &f.computeClassInfer
-			cfg.Window = f.computeClassWindow
-			cfg.Dwell = leeway.Dwell{For: f.computeClassDwell}
-			// Taken by address unconditionally: the flag defaults ARE the
-			// shipped thresholds, so an unset flag reproduces the default
-			// and a set one is honoured — including the zero that turns a
-			// rule off, which is the distinction the pointers exist for.
-			cfg.Rank0ShareFloor = &f.computeClassRank0
-			cfg.LastRankShareCeiling = &f.computeClassLastRank
-			cfg.TierCSignals = f.computeClassTierC
-			// Cluster is not set here: WithStore carries it, below, for the
-			// same reason topologydrift's does — the name only matters to
-			// the persisted episode rows, and a source with no store has no
-			// rows to name.
-			ccSrc, cerr := computeclass.New(client, dyn, cfg)
-			if cerr != nil {
-				return nil, cerr
-			}
-			bs.compClass = ccSrc
-			src = bs.compClass
 		case quota.Name:
 			// §10.2/§11: the quota source is the Project-tier
 			// deployment — quota.New fails LOUDLY (naming the source
@@ -1859,14 +1635,6 @@ func setupRecovery(ctx context.Context, f *flags, client kubernetes.Interface, f
 	if bs.autoscaling != nil {
 		observers = append(observers, bs.autoscaling.ClearanceObserver())
 		log.Printf("recovery: autoscaling clearance observer registered (HPA below max / cap lifted / metrics pipeline alive → cleared)")
-	}
-	if bs.topoDrift != nil {
-		observers = append(observers, bs.topoDrift.ClearanceObserver())
-		log.Printf("recovery: topology-drift clearance observer registered (§8.2 episode resolved / subject gone → cleared)")
-	}
-	if bs.compClass != nil {
-		observers = append(observers, bs.compClass.ClearanceObserver())
-		log.Printf("recovery: compute-class clearance observer registered (§7.7.4 rank episode resolved / class gone → cleared)")
 	}
 	if bs.objState != nil {
 		rsOwners, err := recoveryReplicaSetOwners(ctx, f, client, factory)

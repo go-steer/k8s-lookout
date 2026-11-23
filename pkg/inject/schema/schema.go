@@ -13,21 +13,25 @@
 // limitations under the License.
 
 // Package schema exports the signal-schema v1 kind ledger as data
-// (docs/signal-schema-v1.md; frozen at M5): every shipped signal
-// kind, the wire struct that serializes it, and its one-line role.
+// (docs/signal-schema-v1.md; frozen at M5): every shipped or retired
+// signal kind, the wire struct that serializes it, and its one-line role.
 //
 // Two consumers share this slice so they cannot drift apart: the
 // freeze test in pkg/inject (TestSchemaV1_KindInventory pins the
-// count and the kind→struct mapping) and the docs-site generator
-// (internal/sitedoc renders the signal-kind catalog page from it).
+// active and retired counts and the kind→struct mapping) and the
+// docs-site generator (internal/sitedoc renders the signal-kind
+// catalog page from it).
 // Because every Kind field references the owning package's constant,
 // renaming a constant without updating the ledger is a compile
 // error, not a doc-rot risk.
 //
 // Additions are v1-additive (§8): extend this ledger, the field pins
 // in pkg/inject/schema_freeze_test.go, and docs/signal-schema-v1.md
-// in the same change. Removing or renaming an entry is a v2
-// negotiation with fleet consumers, never a routine edit.
+// in the same change. Retired kinds stay in this ledger with
+// Retired=true (retired, name reserved, never reused) so historical
+// records remain decodable and no future source can reuse a retired wire
+// name. Removing or renaming an entry is a v2 negotiation with fleet
+// consumers, never a routine edit.
 package schema
 
 import (
@@ -50,25 +54,29 @@ import (
 	"github.com/go-steer/k8s-lookout/pkg/sources/workload"
 )
 
-// KindSpec is one shipped signal kind in the v1 ledger.
+// KindSpec is one signal kind in the v1 ledger.
 type KindSpec struct {
 	// Kind is the wire value of the payload's `kind` field.
 	Kind string
 	// Payload is the zero value of the wire struct that serializes
 	// this kind (reflect.TypeOf(Payload) is the freeze test's pin).
 	Payload any
-	// Source is the `--sources` name of the emitting source, or ""
-	// for the cross-cutting kinds the dispatcher itself emits
-	// (outcome records, storms, watchboard, triage evidence).
+	// Source is the `--sources` name of the emitting source (or former
+	// source when Retired is true), or "" for the cross-cutting kinds
+	// the dispatcher itself emits (outcome records, storms, watchboard,
+	// triage evidence).
 	Source string
 	// Doc is the one-line role, for listings and the docs site.
 	Doc string
+	// Retired marks a v1 kind whose emitting watch source has been
+	// retired: retired, name reserved, never reused.
+	Retired bool
 }
 
 // Kinds returns the full v1 kind inventory in ledger order:
-// the frozen M0 pair, the cross-cutting dispatcher kinds, then the
-// source-namespaced kinds source by source (§7.3). The returned
-// slice is a copy; callers may reorder it freely.
+// the frozen M0 pair, the cross-cutting dispatcher kinds, the active
+// source-namespaced kinds (§7.3), and the retired/reserved kinds. The
+// returned slice is a copy; callers may reorder it freely.
 func Kinds() []KindSpec {
 	out := make([]KindSpec, len(kinds))
 	copy(out, kinds)
@@ -80,150 +88,143 @@ var kinds = []KindSpec{
 	// playbook back-compat, and the dispatcher never stamps §8
 	// identity fields on these.
 	{inject.KindEvent, inject.Payload{}, "k8s-events",
-		"Frozen reactive kind: the opening inject of a per-incident session; its wire shape is byte-identical for playbook back-compat."},
+		"Frozen reactive kind: the opening inject of a per-incident session; its wire shape is byte-identical for playbook back-compat.", false},
 	{inject.KindFollowup, inject.Payload{}, "k8s-events",
-		"Frozen reactive kind: a repeat of an incident still open past its dedup window, injected into its session; repeat_count > 0 marks a pure reminder (nothing changed), omitted means the signal changed."},
+		"Frozen reactive kind: a repeat of an incident still open past its dedup window, injected into its session; repeat_count > 0 marks a pure reminder (nothing changed), omitted means the signal changed.", false},
 
 	// §7.4 outcome records (the §9.3 ground-truth labels).
 	{inject.KindResolved, inject.ResolvedPayload{}, "",
-		"§7.4 outcome record: the symptom stayed clear for --recovery-stable-for; carries resolution=recovered|object_deleted."},
+		"§7.4 outcome record: the symptom stayed clear for --recovery-stable-for; carries resolution=recovered|object_deleted.", false},
 	{inject.KindResolvedReverted, inject.ResolvedPayload{}, "",
-		"§7.4 outcome record: the symptom recurred within the revert window after a resolve."},
+		"§7.4 outcome record: the symptom recurred within the revert window after a resolve.", false},
 
 	// §7.5 storm kinds.
 	{inject.KindStorm, inject.StormPayload{}, "",
-		"§7.5 aggregate incident: opened when --storm-min incidents share a blast-radius key within --storm-window."},
+		"§7.5 aggregate incident: opened when --storm-min incidents share a blast-radius key within --storm-window.", false},
 	{inject.KindStormMember, inject.StormMemberPayload{}, "",
-		"§7.5 membership record injected into the storm session for each folded incident."},
+		"§7.5 membership record injected into the storm session for each folded incident.", false},
 	{inject.KindStormMemberSuperseded, inject.StormMemberPayload{}, "",
-		"§7.5 supersede pointer left in a pre-storm incident session that the storm absorbed."},
+		"§7.5 supersede pointer left in a pre-storm incident session that the storm absorbed.", false},
 	{inject.KindStormUpdate, inject.StormUpdatePayload{}, "",
-		"§7.5 storm size refresh (latest wins): membership grew past a reporting threshold."},
+		"§7.5 storm size refresh (latest wins): membership grew past a reporting threshold.", false},
 
 	// §7.7 watchboard kinds.
 	{inject.KindWatchboardDigest, inject.WatchboardDigestPayload{}, "",
-		"§7.7 warning-class batch flushed to the shared watchboard session (--watchboard-batch / --watchboard-flush); each entry carries its fingerprint, object coordinates, and sanitized 512-byte-capped message."},
+		"§7.7 warning-class batch flushed to the shared watchboard session (--watchboard-batch / --watchboard-flush); each entry carries its fingerprint, object coordinates, and sanitized 512-byte-capped message.", false},
 	{inject.KindWatchboardRotated, inject.WatchboardRotatedPayload{}, "",
-		"§15 Q2 size-based rotation pointer naming the successor watchboard session after --watchboard-rotate digests."},
+		"§15 Q2 size-based rotation pointer naming the successor watchboard session after --watchboard-rotate digests.", false},
 
 	// §9.4 regression evidence.
 	{inject.KindTriageRegressed, inject.TriageRegressedPayload{}, "",
-		"§9.4 regression evidence: a downgraded incident's recurrence count reached --triage-regress-factor times its count at downgrade — evidence only, never a re-page."},
+		"§9.4 regression evidence: a downgraded incident's recurrence count reached --triage-regress-factor times its count at downgrade — evidence only, never a re-page.", false},
 
 	// §10.3 cross-source join notice.
 	{inject.KindFamilyMember, inject.FamilyMemberPayload{}, "",
-		"§10.3 cross-source join: a signal from a different source family attached to this session's incident (leading↔reactive) — at most one per source family per incident per dedup window; storm members never fan these out."},
+		"§10.3 cross-source join: a signal from a different source family attached to this session's incident (leading↔reactive) — at most one per source family per incident per dedup window; storm members never fan these out.", false},
 
 	// §11 capability loss. Not owned by any one source: the subject
 	// is the sentinel's own coverage, and the denied source is the
 	// signal's `name`.
 	{sources.KindAccessRevoked, inject.Payload{}, "",
-		"§11 coverage loss: a permission the sentinel held at startup is denied now, confirmed over consecutive SSAR sweeps — from here that source sees nothing, and its silence means less than it did."},
+		"§11 coverage loss: a permission the sentinel held at startup is denied now, confirmed over consecutive SSAR sweeps — from here that source sees nothing, and its silence means less than it did.", false},
 
 	// Source-namespaced kinds (§7.3): all ride inject.Payload with
 	// the full §8 identity stamped.
 	{objectstate.KindNodeNotReady, inject.Payload{}, "object-state",
-		"A Node's Ready condition transitioned True→False/Unknown — workloads on that node are next."},
+		"A Node's Ready condition transitioned True→False/Unknown — workloads on that node are next.", false},
 	{objectstate.KindNodeFlapping, inject.Payload{}, "object-state",
-		"A Node's Ready condition flapped repeatedly within the flap window."},
+		"A Node's Ready condition flapped repeatedly within the flap window.", false},
 	{objectstate.KindProgressDeadline, inject.Payload{}, "object-state",
-		"A Deployment rollout made no progress with unready replicas — fired BEFORE the control plane's ProgressDeadlineExceeded event."},
+		"A Deployment rollout made no progress with unready replicas — fired BEFORE the control plane's ProgressDeadlineExceeded event.", false},
 	{objectstate.KindEndpointsEmpty, inject.Payload{}, "object-state",
-		"A Service's ready-endpoint count transitioned >0 → 0."},
+		"A Service's ready-endpoint count transitioned >0 → 0.", false},
 	{objectstate.KindPDBGridlocked, inject.Payload{}, "object-state",
-		"A PodDisruptionBudget's disruptionsAllowed transitioned >0 → 0 while pods behind it exist — drains will stall."},
+		"A PodDisruptionBudget's disruptionsAllowed transitioned >0 → 0 while pods behind it exist — drains will stall.", false},
 	{objectstate.KindRestartBurst, inject.Payload{}, "object-state",
-		"A pod's summed container restart count grew past the burst threshold — the leading edge of a crash loop, ahead of BackOff events."},
+		"A pod's summed container restart count grew past the burst threshold — the leading edge of a crash loop, ahead of BackOff events.", false},
 	{objectstate.KindNodePressure, inject.Payload{}, "object-state",
-		"A Node's kubelet pressure condition (MemoryPressure/DiskPressure/PIDPressure) went False→True; escalates to critical when sustained or paired with eviction activity on the node."},
+		"A Node's kubelet pressure condition (MemoryPressure/DiskPressure/PIDPressure) went False→True; escalates to critical when sustained or paired with eviction activity on the node.", false},
 	{objectstate.KindEvictionBurst, inject.Payload{}, "object-state",
-		"N pod evictions on one node within the burst window, folded into ONE node-scoped signal — the storm-off fallback for the per-pod Evicted event family."},
+		"N pod evictions on one node within the burst window, folded into ONE node-scoped signal — the storm-off fallback for the per-pod Evicted event family.", false},
 	{rollout.KindStall, inject.Payload{}, "rollout",
-		"A new revision made zero ready-count progress for --rollout-observe while the old revision stayed healthy."},
+		"A new revision made zero ready-count progress for --rollout-observe while the old revision stayed healthy.", false},
 	{workload.KindJobFailed, inject.Payload{}, "workload",
-		"A Job's Failed condition went True (BackoffLimitExceeded, DeadlineExceeded, ...) — batch failure with no crashlooping pod behind it."},
+		"A Job's Failed condition went True (BackoffLimitExceeded, DeadlineExceeded, ...) — batch failure with no crashlooping pod behind it.", false},
 	{workload.KindCronMissed, inject.Payload{}, "workload",
-		"An unsuspended CronJob passed a scheduled activation without lastScheduleTime advancing; consecutive misses escalate to critical."},
+		"An unsuspended CronJob passed a scheduled activation without lastScheduleTime advancing; consecutive misses escalate to critical.", false},
 	{autoscaling.KindPinned, inject.Payload{}, "autoscaling",
-		"An HPA sat at maxReplicas with its metric still over target past the sustain window — the autoscaler is out of headroom (escalates to critical when sustained longer)."},
+		"An HPA sat at maxReplicas with its metric still over target past the sustain window — the autoscaler is out of headroom (escalates to critical when sustained longer).", false},
 	{autoscaling.KindMetricsDead, inject.Payload{}, "autoscaling",
-		"An HPA's metrics pipeline is broken (ScalingActive=False with a FailedGet* reason, sustained) — autoscaling is silently dead."},
+		"An HPA's metrics pipeline is broken (ScalingActive=False with a FailedGet* reason, sustained) — autoscaling is silently dead.", false},
 	{saturation.KindForecast, inject.Payload{}, "saturation",
-		"A linear-regression forecast says a resource dimension exhausts within --saturation-warn (critical below 15m)."},
+		"A linear-regression forecast says a resource dimension exhausts within --saturation-warn (critical below 15m).", false},
 	{degradation.KindCapacity, inject.Payload{}, "degradation",
-		"A Service's ready-endpoint ratio declined stepwise across --degradation-window — capacity eroding before the outage."},
+		"A Service's ready-endpoint ratio declined stepwise across --degradation-window — capacity eroding before the outage.", false},
 	{degradation.KindProbeFlap, inject.Payload{}, "degradation",
-		"A pod's readiness gate flipped repeatedly without ever sustaining failure long enough for the reactive Unhealthy path."},
+		"A pod's readiness gate flipped repeatedly without ever sustaining failure long enough for the reactive Unhealthy path.", false},
 	{expiry.KindWarning, inject.Payload{}, "expiry",
-		"An expiry countdown (certificate/token) crossed a threshold: warning at --expiry-warn, critical at the design-fixed 72h."},
+		"An expiry countdown (certificate/token) crossed a threshold: warning at --expiry-warn, critical at the design-fixed 72h.", false},
 	{expiry.KindChallengeStuck, inject.Payload{}, "expiry",
-		"A cert-manager ACME Challenge stayed pending past --expiry-acme-grace, or reached a terminal failure state (invalid/errored/expired). Carries the ACME reason and DNS name; controller_ref names the owning Certificate, whose incident it reattaches to."},
+		"A cert-manager ACME Challenge stayed pending past --expiry-acme-grace, or reached a terminal failure state (invalid/errored/expired). Carries the ACME reason and DNS name; controller_ref names the owning Certificate, whose incident it reattaches to.", false},
 	{expiry.KindOrderFailed, inject.Payload{}, "expiry",
-		"A cert-manager ACME Order reached a terminal failure state, or stayed pending past --expiry-acme-grace with no Challenge created (no solver matched). Carries the reason and DNS names; controller_ref names the owning Certificate."},
+		"A cert-manager ACME Order reached a terminal failure state, or stayed pending past --expiry-acme-grace with no Challenge created (no solver matched). Carries the reason and DNS names; controller_ref names the owning Certificate.", false},
 	{capacity.KindPending, inject.Payload{}, "capacity",
-		"A NotTriggerScaleUp event: the autoscaler declined a pending pod, with per-nodegroup rejection reasons."},
+		"A NotTriggerScaleUp event: the autoscaler declined a pending pod, with per-nodegroup rejection reasons.", false},
 	{capacity.KindScaleUp, inject.Payload{}, "capacity",
-		"A TriggeredScaleUp event: the autoscaler asked the cloud for nodes (info; stored context for later gaps)."},
+		"A TriggeredScaleUp event: the autoscaler asked the cloud for nodes (info; stored context for later gaps).", false},
 	{capacity.KindScaleDown, inject.Payload{}, "capacity",
-		"The ScaleDown event family (info; warning for ScaleDownFailed)."},
+		"The ScaleDown event family (info; warning for ScaleDownFailed).", false},
 	{capacity.KindScaleUpGap, inject.Payload{}, "capacity",
-		"A nodegroup's cloudProviderTarget exceeded its ready count beyond the sustain window — asked for a node, didn't get one."},
+		"A nodegroup's cloudProviderTarget exceeded its ready count beyond the sustain window — asked for a node, didn't get one.", false},
 	{capacity.KindStockout, inject.Payload{}, "capacity",
-		"A provider scale decision names a stockout: the zone/machine-type has no capacity. Remedy-disjoint from quota."},
+		"A provider scale decision names a stockout: the zone/machine-type has no capacity. Remedy-disjoint from quota.", false},
 	{capacity.KindQuotaBlocked, inject.Payload{}, "capacity",
-		"A provider scale decision names quota exhaustion: file a quota increase (§10.3). Remedy-disjoint from stockout."},
+		"A provider scale decision names quota exhaustion: file a quota increase (§10.3). Remedy-disjoint from stockout.", false},
 	{capacity.KindIPExhausted, inject.Payload{}, "capacity",
-		"A provider scale decision names IP exhaustion: new nodes/pods cannot get addresses."},
+		"A provider scale decision names IP exhaustion: new nodes/pods cannot get addresses.", false},
 	{capacity.KindPendingAged, inject.Payload{}, "capacity",
-		"A pod stayed Pending+Unschedulable past --pending-age (critical past the design-fixed 15m)."},
+		"A pod stayed Pending+Unschedulable past --pending-age (critical past the design-fixed 15m).", false},
 	{capacity.KindClusterForecast, inject.Payload{}, "capacity",
-		"A scheduling domain's pod-requests/node-allocatable ratio is on a linear trend to reach 1.0 — cluster full in ~N hours, before the first pod goes Pending."},
+		"A scheduling domain's pod-requests/node-allocatable ratio is on a linear trend to reach 1.0 — cluster full in ~N hours, before the first pod goes Pending.", false},
 	{ingress.KindSyncFailed, inject.Payload{}, "ingress",
-		"An ingress-gce Warning Sync event on an Ingress: GCLB programming is failing while the Ingress object looks fine."},
+		"An ingress-gce Warning Sync event on an Ingress: GCLB programming is failing while the Ingress object looks fine.", false},
 	{ingress.KindTranslateFailed, inject.Payload{}, "ingress",
-		"An ingress-gce Warning Translate event on an Ingress: the spec could not be translated into GCLB resources."},
+		"An ingress-gce Warning Translate event on an Ingress: the spec could not be translated into GCLB resources.", false},
 	{ingress.KindNEGFailed, inject.Payload{}, "ingress",
-		"A NEG-controller failure on a Service (sync/attach/detach/retry): endpoints are not reaching the load balancer."},
+		"A NEG-controller failure on a Service (sync/attach/detach/retry): endpoints are not reaching the load balancer.", false},
 	{gateway.KindProgrammingFailed, inject.Payload{}, "gateway",
-		"A Gateway (top-level or listener) held Programmed=False past the grace window: the load balancer/data plane is not being programmed. The Gateway-API analog of ingress.sync_failed."},
+		"A Gateway (top-level or listener) held Programmed=False past the grace window: the load balancer/data plane is not being programmed. The Gateway-API analog of ingress.sync_failed.", false},
 	{gateway.KindRouteRejected, inject.Payload{}, "gateway",
-		"A Gateway/listener or HTTPRoute parent held Accepted=False/ResolvedRefs=False past the grace window: the route config never became routable. The analog of ingress.translate_failed."},
+		"A Gateway/listener or HTTPRoute parent held Accepted=False/ResolvedRefs=False past the grace window: the route config never became routable. The analog of ingress.translate_failed.", false},
 	{quota.KindForecast, inject.Payload{}, "quota",
-		"A GCP quota's usage slope projects exhaustion (warning ETA<7d or usage>=90%; critical ETA<48h or >=98%), with a quota-increase draft attached."},
+		"A GCP quota's usage slope projects exhaustion (warning ETA<7d or usage>=90%; critical ETA<48h or >=98%), with a quota-increase draft attached.", false},
 	{notifications.KindUpgrade, inject.Payload{}, "notifications",
-		"The provider announced a control-plane or node-pool upgrade starting — store-recorded evidence for incident-window correlation."},
+		"The provider announced a control-plane or node-pool upgrade starting — store-recorded evidence for incident-window correlation.", false},
 	{notifications.KindUpgradeAvailable, inject.Payload{}, "notifications",
-		"The provider offered a new version for auto-upgrade."},
+		"The provider offered a new version for auto-upgrade.", false},
 	{notifications.KindSecurityBulletin, inject.Payload{}, "notifications",
-		"A provider security bulletin affects this cluster — batched to the watchboard."},
+		"A provider security bulletin affects this cluster — batched to the watchboard.", false},
 	{tokenburn.KindBurn, inject.Payload{}, "token-burn",
-		"An agent session's token rate ran at --burn-multiple times the cross-session baseline, or projects budget exhaustion within --burn-eta."},
+		"An agent session's token rate ran at --burn-multiple times the cross-session baseline, or projects budget exhaustion within --burn-eta.", false},
 
-	// Leeway findings (docs/leeway-design.md §2.3). These ride
-	// inject.Payload like the rest: the §8.5 finding document is the
-	// store's and `cmd/leeway`'s representation, and `message` is its
-	// rendering, so the kinds are additive without freezing a fifth
-	// wire struct against fleet consumers.
+	// Retired in #842 (superseded by github.com/go-steer/leeway):
+	// retired, name reserved, never reused. Kept in the v1 ledger with
+	// Retired=true and pinned to inject.Payload so historical records remain
+	// decodable and no future watch source can collide with a retired name.
 	{leeway.KindDomainUnavailable, inject.Payload{}, "topology-drift",
-		"A topology domain has no node anything can be scheduled onto — the subject is the domain and not a workload, so a dead zone is one signal rather than one per workload that drifted because of it."},
+		"Retired in #842 (name reserved, never reused; superseded by github.com/go-steer/leeway): a topology domain had no node anything could be scheduled onto.", true},
 	{leeway.KindContractViolated, inject.Payload{}, "topology-drift",
-		"A declared topology contract (a DoNotSchedule spread constraint or a required anti-affinity) is being violated, sustained past the dwell window."},
+		"Retired in #842 (name reserved, never reused; superseded by github.com/go-steer/leeway): a declared topology contract was violated past the dwell window.", true},
 	{leeway.KindPlacementDrift, inject.Payload{}, "topology-drift",
-		"A workload's objects deviated from the placement its intent implies — declared, inferred, or, where nobody expressed one, an even apportionment over the domains it can reach (drift ρ over threshold), sustained past the dwell window."},
+		"Retired in #842 (name reserved, never reused; superseded by github.com/go-steer/leeway): a workload's objects deviated from the placement its intent implied.", true},
 	{leeway.KindBaselineBreach, inject.Payload{}, "topology-drift",
-		"A workload that declared nothing left the placement it has held all along — a domain's share fell outside the band around its own learned normal (§7.5), sustained past the dwell window."},
-
-	// The §7.7.4 preference-rank kinds. Their subject is a provider's
-	// compute class rather than a workload, and they are judged on
-	// pod-seconds at each priority rather than on a distribution over
-	// domains, but the §8.5 finding document and the dwell machine are
-	// the same, so they ride the same payload.
+		"Retired in #842 (name reserved, never reused; superseded by github.com/go-steer/leeway): a workload left its learned baseline placement.", true},
 	{leeway.KindRankWedged, inject.Payload{}, "compute-class",
-		"Pods are Pending against a compute class that told the autoscaler not to provision outside its priority list, so no capacity of any rank will arrive without a change to the class."},
+		"Retired in #842 (name reserved, never reused; superseded by github.com/go-steer/leeway): pods Pending against a compute class with no off-list fallback.", true},
 	{leeway.KindRankDegraded, inject.Payload{}, "compute-class",
-		"A compute class is running below the priority it prefers — too little pod-time at rank 0, or too much at the least-preferred tier, sustained past the dwell window. The pods stay Running, which is why nothing else reports it."},
+		"Retired in #842 (name reserved, never reused; superseded by github.com/go-steer/leeway): a compute class ran below its preferred rank.", true},
 	{leeway.KindRankNoMigration, inject.Payload{}, "compute-class",
-		"A compute class that declared it would migrate workloads back to preferred capacity has not done so since that capacity became available again."},
+		"Retired in #842 (name reserved, never reused; superseded by github.com/go-steer/leeway): workloads failed to migrate back to preferred compute-class capacity.", true},
 	{leeway.KindRankTierUnused, inject.Payload{}, "compute-class",
-		"A whole preference tier has never been occupied over the observation window — a dead rung on the priority ladder, or reserved capacity being paid for and never drawn on. Info, not a page: an unused tier is frequently the intended configuration."},
+		"Retired in #842 (name reserved, never reused; superseded by github.com/go-steer/leeway): a preference tier went unoccupied across the observation window.", true},
 }

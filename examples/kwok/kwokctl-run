@@ -14,12 +14,11 @@
 # limitations under the License.
 
 # One-click end-to-end high-scale runner (#495): boots an isolated kwokctl
-# control plane (never touching ~/.kube/config), builds fresh lookout and
-# leeway binaries, measures the 0-pod baseline, scales up to 100,500 S8-padded
-# pods by default, measures quiet leeway-scale and full-source
+# control plane (never touching ~/.kube/config), builds a fresh lookout
+# binary, scales up to 100,500 S8-padded pods by default, measures full-source
 # `lookout watch --dry-run --sources=auto`, runs the 26-command read-path
 # `bench` suite (asserting every command survives its shipped default
-# --timeout), runs rollout-churn leeway-scale, prints a report, and tears down.
+# --timeout), prints a report, and tears down.
 #
 # Usage:
 #   examples/kwok/kwokctl-run [nodes] [workloads] [replicas]
@@ -30,7 +29,6 @@
 # Env:
 #   LOOKOUT_EXAMPLES_CLUSTER         kwokctl cluster name (default: lookout-100k)
 #   LOOKOUT_EXAMPLES_STATE           artifact/kubeconfig dir (default: /tmp/lookout-kwok-$CLUSTER)
-#   KWOKCTL_RUN_CHURN                parallel rollout drivers for churn rung (default: 16; 0 skips)
 #   KWOKCTL_WATCH_SETTLE_S           seconds to settle `lookout watch` after /readyz (default: 15)
 #   KWOKCTL_WATCH_WINDOW_S           seconds to sample `lookout watch` steady-state CPU/RSS (default: 15)
 #   KWOKCTL_REQUIRE_DEFAULT_TIMEOUT  1 = fail if any read command misses its default --timeout (default: 1)
@@ -52,7 +50,6 @@ NODES="${1:-2000}"
 WORKLOADS="${2:-5000}"
 REPLICAS="${3:-25}"
 
-RUN_CHURN="${KWOKCTL_RUN_CHURN:-16}"
 WATCH_SETTLE_S="${KWOKCTL_WATCH_SETTLE_S:-15}"
 WATCH_WINDOW_S="${KWOKCTL_WATCH_WINDOW_S:-15}"
 REQUIRE_DEFAULT_TO="${KWOKCTL_REQUIRE_DEFAULT_TIMEOUT:-1}"
@@ -72,7 +69,6 @@ fi
 
 WATCH_TSV="$STATE_DIR/watch-scale.tsv"
 BENCH_TSV="$STATE_DIR/bench.tsv"
-LEEWAY_TSV="$STATE_DIR/leeway-scale.tsv"
 
 watch_pid=""
 cluster_started=0
@@ -97,56 +93,38 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$STATE_DIR/bin"
-rm -f "$LEEWAY_TSV" "$WATCH_TSV" "$BENCH_TSV"
+rm -f "$WATCH_TSV" "$BENCH_TSV"
 
-# ---- 1. Build fresh binaries from the working tree --------------------------
+# ---- 1. Build fresh binary from the working tree ----------------------------
 
-echo "━━━ [1/8] Building lookout & leeway binaries ━━━"
+echo "━━━ [1/5] Building lookout binary ━━━"
 if [[ -z "${LOOKOUT_BIN:-}" ]]; then
   LOOKOUT_BIN="$STATE_DIR/bin/lookout"
   echo "▸ building lookout -> $LOOKOUT_BIN"
   (cd "$(repo_root)" && go build -o "$LOOKOUT_BIN" ./cmd/lookout)
 fi
-if [[ -z "${LEEWAY_BIN:-}" ]]; then
-  LEEWAY_BIN="$STATE_DIR/bin/leeway"
-  echo "▸ building leeway  -> $LEEWAY_BIN"
-  (cd "$(repo_root)" && go build -o "$LEEWAY_BIN" ./cmd/leeway)
-fi
-export LOOKOUT_BIN LEEWAY_BIN
+export LOOKOUT_BIN
 echo "  ✓ lookout: $LOOKOUT_BIN"
-echo "  ✓ leeway:  $LEEWAY_BIN"
 
 # ---- 2. Boot isolated kwokctl control plane ---------------------------------
 
 echo
-echo "━━━ [2/8] Booting isolated kwokctl control plane ($CLUSTER_NAME) ━━━"
+echo "━━━ [2/5] Booting isolated kwokctl control plane ($CLUSTER_NAME) ━━━"
 cluster_started=1
 "$(kwok_root)/kwokctl-up"
 export KUBECONFIG="$KWOKCTL_KUBECONFIG"
 export LOOKOUT_EXAMPLES_CONTEXT="kwok-${CLUSTER_NAME}"
 
-# ---- 3. Rung 0: empty-cluster leeway baseline -------------------------------
+# ---- 3. Scale up S8-padded synthetic fleet ----------------------------------
 
 echo
-echo "━━━ [3/8] Measuring leeway-scale rung 0 (empty cluster intercept) ━━━"
-"$(kwok_root)/leeway-scale"
-
-# ---- 4. Scale up S8-padded synthetic fleet ----------------------------------
-
-echo
-echo "━━━ [4/8] Scaling up synthetic fleet ($NODES nodes, $WORKLOADS workloads, $REPLICAS replicas) ━━━"
+echo "━━━ [3/5] Scaling up synthetic fleet ($NODES nodes, $WORKLOADS workloads, $REPLICAS replicas) ━━━"
 "$(kwok_root)/scale-up" "$NODES" "$WORKLOADS" "$REPLICAS"
 
-# ---- 5. Rung 1: quiet loaded leeway-scale + marginal KiB/pod ----------------
+# ---- 4. Full-source lookout watch (--dry-run --sources=auto) ----------------
 
 echo
-echo "━━━ [5/8] Measuring leeway-scale loaded quiet rung ━━━"
-"$(kwok_root)/leeway-scale"
-
-# ---- 6. Full-source lookout watch (--dry-run --sources=auto) ----------------
-
-echo
-echo "━━━ [6/8] Measuring lookout watch --dry-run --sources=auto ━━━"
+echo "━━━ [4/5] Measuring lookout watch --dry-run --sources=auto ━━━"
 watch_port="${KWOKCTL_WATCH_PORT:-}"
 if [[ -z "$watch_port" ]]; then
   if command -v python3 >/dev/null 2>&1; then
@@ -235,23 +213,12 @@ printf '  %-24s %s MiB\n' "steady VmRSS" "$watch_rss_mb"
 printf '  %-24s %s MiB\n' "Go heap in use" "$watch_heap_mb"
 printf '  %-24s %s core\n' "steady-state CPU" "$watch_cpu_core"
 
-# ---- 7. Read-path benchmark suite (26 commands) -----------------------------
+# ---- 5. Read-path benchmark suite (26 commands) -----------------------------
 
 echo
-echo "━━━ [7/8] Running read-path benchmark suite (BENCH_REQUIRE_DEFAULT_TIMEOUT=$REQUIRE_DEFAULT_TO) ━━━"
+echo "━━━ [5/5] Running read-path benchmark suite (BENCH_REQUIRE_DEFAULT_TIMEOUT=$REQUIRE_DEFAULT_TO) ━━━"
 bench_rc=0
 BENCH_REQUIRE_DEFAULT_TIMEOUT="$REQUIRE_DEFAULT_TO" "$(kwok_root)/bench" || bench_rc=$?
-
-# ---- 8. Rung 2: rollout churn leeway-scale ----------------------------------
-
-if ((RUN_CHURN > 0)); then
-  echo
-  echo "━━━ [8/8] Measuring leeway-scale under rollout churn (LEEWAY_SCALE_CHURN=$RUN_CHURN) ━━━"
-  LEEWAY_SCALE_CHURN="$RUN_CHURN" "$(kwok_root)/leeway-scale"
-else
-  echo
-  echo "━━━ [8/8] Skipping churn rung (KWOKCTL_RUN_CHURN=0) ━━━"
-fi
 
 # ---- Consolidated Summary ---------------------------------------------------
 
@@ -260,7 +227,6 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  kwokctl-run summary ($watch_nodes nodes, $watch_pods S8-padded pods)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Artifacts in $STATE_DIR:"
-echo "    - leeway-scale: $LEEWAY_TSV"
 echo "    - watch-scale:  $WATCH_TSV"
 echo "    - read bench:   $BENCH_TSV"
 echo

@@ -228,7 +228,7 @@ deliberately absent from the wire-kind inventory below. The table here
 exists only to pin the fingerprint INPUTS, which are a cross-cluster
 contract in a way a glossary entry is not.
 
-## Kind inventory (v1: 59 kinds — 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, +2 `autoscaling.*` #131, +2 `gateway.*` #168, +1 `sentinel.access_revoked` #385, +3 `leeway.*` topology-drift verdicts #416, +4 `leeway.rank_*` #416 phase 6, +1 `leeway.domain_unavailable` #416 phase 7, +2 `expiry.*` ACME stalls #542, additive-only)
+## Kind inventory (v1: 59 reserved names — 51 active + 8 retired in #842; 32 at the M5 freeze, +2 `workload.*` #129, +3 `notification.*` #130, +3 `ingress.*` #135, +1 `family.member` #132, +2 `objectstate.*` #134, +1 `capacity.cluster_forecast` #131, +2 `autoscaling.*` #131, +2 `gateway.*` #168, +1 `sentinel.access_revoked` #385, +8 `leeway.*` #416 [retired & reserved #842], +2 `expiry.*` ACME stalls #542)
 
 The `sentinel.access_revoked` row and the third topology-drift verdict both
 landed without bumping this heading; the count above is the corrected one and
@@ -273,49 +273,27 @@ Gateway-API sibling of `ingress.*`: sustained `Programmed`/`Accepted`/
 `ResolvedRefs`=False status conditions on `Gateway`/`HTTPRoute`),
 `quota.forecast`,
 `notification.upgrade|upgrade_available|security_bulletin` (added
-post-M5, #130), `token.burn`, `leeway.
-contract_violated|placement_drift|baseline_breach` (added post-M5, #416
-— the topology-drift verdicts of docs/leeway-design.md §2.3; a Tier C
-finding, scored against an apportionment or a learned baseline nobody
-declared, stays metrics-only unless `--topology-tier-c-signals` is set,
-§8.3), `leeway.
-rank_wedged|rank_degraded|rank_no_migration|rank_tier_unused` (added
-post-M5, #416 phase 6 — the §7.7.4 preference-rank verdicts of a
-provider compute class; `rank_tier_unused` is the Tier C row and stays
-metrics-only unless `--compute-class-tier-c-signals` is set).
+post-M5, #130), `token.burn`.
 
-The leeway kinds ride `Payload` like every other source-namespaced
-kind: the §8.5 finding document is the store's and `cmd/leeway`'s
-representation and `message` is its rendering, so no fifth wire struct
-is frozen against fleet consumers. Their `uid` is synthetic —
-`leeway:<subject>|<topology-key>`, following `capacity`'s
-`nodegroup:<name>` precedent — because the dedup key must carry the
-axis: one Deployment can drift on `topology.kubernetes.io/zone` and be
-within tolerance on `region`, and those are two findings with two dwell
-timers. `reason` is the suspected cause (§8.5), so a differently-caused
-episode gets its own identity.
+Retired and reserved kinds (`Retired: true` in `pkg/inject/schema`,
+retired in `#842` — **retired, name reserved, never reused**):
+`leeway.domain_unavailable|contract_violated|placement_drift|baseline_breach`
+(originally added post-M5 in #416 for `topology-drift`) and
+`leeway.rank_wedged|rank_degraded|rank_no_migration|rank_tier_unused`
+(originally added post-M5 in #416 phase 6 for `compute-class`). Both
+watch sources were removed in `#842` in favor of standalone
+[`github.com/go-steer/leeway`](https://github.com/go-steer/leeway);
+their eight wire names remain pinned to `Payload` in
+`TestSchemaV1_KindInventory` so historical store/eventlog records remain
+decodable and no future watch source can reuse them.
 
-The `leeway.rank_*` kinds follow the same shape with two deliberate
-differences. Their `uid` prefix is `leeway-rank:` rather than
-`leeway:`, because the two sources share one subject vocabulary and one
-persisted alert table: a common prefix would let topology-drift's
-clearance observer report a rank incident recovered on its first sweep,
-and a hyphen instead of a colon makes that parse fail outright rather
-than half-succeed. And their `reason` is the judging rule
-(`wedged`, `rank0-share`, `last-rank`, `rank-baseline`, `no-migration`,
-`tier-unused`)
-rather than a suspected cause, because a rank verdict names the
-measurement it failed, not a hypothesis about why.
-
-`leeway.domain_unavailable` is the one leeway kind whose subject is not
-something that was placed: `kind_of_object` is `Domain` and `name` is
-the domain, so a zone with no usable node is one signal for the cluster
-rather than one per workload that drifted because of it — those stay
-suppressed by §7.6. Its `uid` is the same `leeway:<subject>|<axis>`
-shape, and its `reason` is the suspected cause
-(`consolidation`, `domain_outage`, `taint_exclusion`), which is what
-separates a zone whose nodes were deleted from one whose nodes were
-cordoned.
+Historical shape of the retired `leeway.*` kinds: they rode `Payload`
+like every other source-namespaced kind, with synthetic `uid`
+`leeway:<subject>|<topology-key>` (`reason` = suspected cause; for
+`leeway.domain_unavailable`, `kind_of_object` = `Domain` and `name` =
+domain) and `leeway-rank:<subject>|<axis>` for `leeway.rank_*` (`reason`
+= judging rule: `wedged`, `rank0-share`, `last-rank`, `rank-baseline`,
+`no-migration`, `tier-unused`).
 
 ## Frozen field sets
 
@@ -615,6 +593,27 @@ first external consumer deploys.
   (`TestWatchboardDigest_ExactWireShape`,
   `TestWebhookDispatch_ExactWatchboardDigestWireShape`) gained the
   trailing field.
+- **2026-11-23 — eight `leeway.*` wire kinds retired and reserved (#842):**
+  `leeway.domain_unavailable`, `leeway.contract_violated`,
+  `leeway.placement_drift`, `leeway.baseline_breach`,
+  `leeway.rank_wedged`, `leeway.rank_degraded`,
+  `leeway.rank_no_migration`, and `leeway.rank_tier_unused` are marked
+  **retired, name reserved, never reused** (`KindSpec.Retired = true` in
+  `pkg/inject/schema/schema.go`) alongside the Phase 2 removal of
+  `lookout watch`'s `topology-drift` and `compute-class` sources in
+  favor of [`github.com/go-steer/leeway`](https://github.com/go-steer/leeway).
+  `lookout watch` no longer emits these eight kinds, but all eight remain
+  pinned to `Payload` in `TestSchemaV1_KindInventory` (51 active + 8
+  retired = 59 reserved v1 names) so existing v1 consumers and corpus
+  harvesters reading historical eventlogs or stores continue to decode
+  them without breaking, and no future source can reuse a retired wire
+  name. Per the repository owner's (`garisingh`) explicit decision
+  recorded on the `go-steer/shipmind#134` follow-up — because the
+  owner/team are the sole consumers of `k8s-lookout` — the time-based
+  deprecation window in `docs/cli-stability-policy.md` Rule 3 (`>= 2`
+  minor releases and `>= 60` calendar days) was explicitly waived for
+  `#842` only, while keeping `docs/cli-stability-policy.md` intact as
+  general policy.
 
 ## Evolution
 

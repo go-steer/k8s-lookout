@@ -108,9 +108,8 @@ opens agent incident sessions from leading indicators (watch-path).
 §14 phase plan is complete (`docs/milestones/M0–M5.md`), and subsequent
 releases have expanded the read surface (`scan`, `findings`, `audit`,
 `state gateway|keda|storage`, `stab scaledown`, opt-in `net probe-from`),
-the watch-path signal suite (`pkg/sources/*`; note `topology-drift`,
-`compute-class`, and `cmd/leeway` are deprecated in #842 in favor of
-`github.com/go-steer/leeway`), MCP
+the watch-path signal suite (`pkg/sources/*`; placement-skew and
+`ComputeClass` rank drift moved to `github.com/go-steer/leeway` in #842), MCP
 serving (`lookout mcp` profiles + authenticated HTTP), AX sink integration
 (`internal/axsink`), Kustomize + Helm deployments (`deploy/chart`), and
 the Starlight docs site (`docs/site/`). Every §4.1 command group and all

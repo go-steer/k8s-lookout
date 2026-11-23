@@ -14,47 +14,21 @@
 
 name: Scale (kwok)
 
-# The placement subsystem's scale regression guard, per leeway-design
-# §6.6 and #478. A padded kwok fleet, the standalone `leeway` binary
-# measured against it, and two ceilings on the result:
+# Read-path and soak scale regression guard on a padded kwok fleet:
 #
-#   - marginal resident cost per pod, from a two-rung ladder
-#   - evaluation p99, from the histogram
+#   - soak verdict self-test (`examples/kwok/soak --selftest`)
+#   - read-path bench self-test (`examples/kwok/bench --selftest`)
+#   - full cluster-wide read-path benchmark (`examples/kwok/bench`) with
+#     default `--timeout` survival (`BENCH_REQUIRE_DEFAULT_TIMEOUT=1`) and
+#     peak RSS ceiling (`BENCH_MAX_PEAK_MB=768`)
 #
-# Two tiers, the same shape as e2e-kind.yml:
+# Two tiers, matching e2e-kind.yml:
 #
-#   - push to main   → 100 fake nodes / ~1,000 pods (~20 min)
-#   - weekly/manual  → 500 fake nodes / ~5,000 pods (~90 min)
+#   - push to main   → 100 fake nodes / ~1,000 pods (~15 min)
+#   - weekly/manual  → 500 fake nodes / ~5,000 pods (~45 min)
 #
-# WHY NOT ON EVERY CHANGE. #478 asks for the small padded tier as a
-# per-change guard. It is not affordable as one: building 5,000
-# correctly-weighted pods through a real apiserver takes tens of
-# minutes of wall clock whatever the runner, because the cost is API
-# round trips rather than CPU, and a two-hour required check on every
-# PR would be paid on every PR that cannot possibly move these numbers.
-# Post-merge is the earliest point where the cost is paid once per
-# change instead of once per push, and it is the same trade e2e-kind
-# already makes for the same reason.
-#
-# WHY A LADDER AND NOT A SINGLE NUMBER. A single rung carries the fixed
-# cost of an idle process inside it, so it cannot be divided by the pod
-# count. The job takes a rung on the EMPTY cluster first, then scales
-# up and takes a second, and the marginal cost is the difference. That
-# also means the ceiling is insensitive to the Go runtime's baseline
-# moving, which is not what this is guarding.
-#
-# The ceilings are regression guards, not targets. As measured on
-# 2026-09-22 across four rungs from 14 to 8,814 pods the figures are
-# 63.3 KiB/pod marginal resident over a 52.9 MiB idle intercept, and a
-# 1 ms evaluation p99 at 8,814 pods idle (5 ms under churn — the p99 is
-# a function of event rate, not of pod count, so quote the churn number
-# when comparing against a live cluster). The ceilings sit well above
-# all of those, because a hosted runner is noisy and a guard that fires
-# on noise gets ignored. Raise them only with a reason written down.
-#
-# On failure the unattended tiers file or update one tracking issue,
-# for the same reason e2e-kind does: under auto-merge nobody watches
-# the Actions tab.
+# Placement/rank watch scale ladders moved with leeway to
+# https://github.com/go-steer/leeway (#842).
 
 on:
   schedule:
@@ -72,12 +46,8 @@ on:
   push:
     branches: [main]
     paths:
-      # Only what can move these numbers. The subsystem, the binary
-      # that isolates it, the shared client/watch plumbing it sits on,
-      # and the harness itself.
       - 'pkg/kube/**'
-      - 'pkg/sources/topologydrift/**'
-      - 'cmd/leeway/**'
+      - 'pkg/checks/**'
       - 'internal/watch/**'
       - 'examples/kind/**'
       - 'examples/kwok/**'
@@ -95,27 +65,11 @@ concurrency:
 jobs:
   scale:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
-    env:
-      # Ceilings. See the header: guards, not targets.
-      LEEWAY_SCALE_MAX_KIB_PER_POD: '110'
-      LEEWAY_SCALE_MAX_P99_MS: '25'
-      # A hosted runner is slower and noisier than the workstation these
-      # were calibrated on, so settle longer and sample longer. A short
-      # window on a noisy machine reports the noise.
-      LEEWAY_SCALE_SETTLE: '60'
-      LEEWAY_SCALE_WINDOW: '90'
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Soak verdict self-test
-        # The soak itself is too long to run here — it is the manual
-        # sibling of this workflow — but its verdict is ordinary logic
-        # and it has already been wrong once, in the direction that a
-        # green run cannot detect. This checks it against synthetic
-        # series with known answers. No cluster, about a second, and
-        # first so that a broken verdict fails before the twenty minutes
-        # of cluster below.
         run: examples/kwok/soak --selftest
 
       - name: Read-path bench self-test
@@ -129,24 +83,10 @@ jobs:
         run: go install sigs.k8s.io/kind@v0.31.0
 
       - name: Cluster up
-        # No --build and no demo python pulls: this tier runs `leeway`
-        # and `lookout` from HEAD over kubeconfig against kwok-managed
-        # pods, so nothing is deployed into the real nodes beyond
-        # metrics-server and kwok-controller.
         run: examples/kind/up --no-demo-images
 
       - name: kwok up
         run: examples/kwok/up
-
-      - name: Rung 0 — the empty cluster
-        # The intercept. Without it the ladder has one point and the
-        # per-pod figure would carry the whole fixed cost of the
-        # process. No ceilings here: KiB/pod needs two rungs, and a p99
-        # over an empty cluster is measuring nothing.
-        env:
-          LEEWAY_SCALE_MAX_KIB_PER_POD: '0'
-          LEEWAY_SCALE_MAX_P99_MS: '0'
-        run: examples/kwok/leeway-scale
 
       - name: Scale up
         env:
@@ -157,9 +97,6 @@ jobs:
             push) nodes=100; workloads=400 ;;
             *)    nodes=500; workloads=2000 ;;
           esac
-          # Dispatch overrides, validated as integers rather than
-          # interpolated: these become arguments to a script that
-          # creates cluster objects.
           if [ -n "$TIER_NODES" ]; then
             case "$TIER_NODES" in
               ''|*[!0-9]*) echo "nodes must be a positive integer" >&2; exit 2 ;;
@@ -175,17 +112,7 @@ jobs:
           echo "tier: $nodes fake nodes, $workloads workloads"
           examples/kwok/scale-up "$nodes" "$workloads" 3
 
-      - name: Rung 1 — the loaded cluster, and the verdict
-        # scale-up runs verify-padding itself and leeway-scale refuses
-        # to record an unpadded rung, so a fleet of toy objects cannot
-        # quietly pass this by being cheap to cache.
-        run: examples/kwok/leeway-scale
-
       - name: Read-path scale guard (bench)
-        # Reuses the already-provisioned padded kwok fleet to time every
-        # cluster-wide read command, assert multi-page pagination
-        # completeness (scanned >= fleet_pods), assert survival under
-        # each command's shipped --timeout default, and bound peak RSS.
         env:
           BENCH_REQUIRE_DEFAULT_TIMEOUT: '1'
           BENCH_MAX_PEAK_MB: '768'
@@ -195,7 +122,6 @@ jobs:
         if: failure()
         run: |
           mkdir -p _forensics
-          cp "${TMPDIR:-/tmp}/lookout-examples/leeway-scale.tsv" _forensics/ 2>/dev/null || true
           cp "${TMPDIR:-/tmp}/lookout-examples/bench.tsv" _forensics/ 2>/dev/null || true
           kubectl get nodes -o wide >_forensics/nodes.txt 2>&1 || true
           kubectl get pods -A -o wide >_forensics/pods.txt 2>&1 || true
@@ -227,5 +153,5 @@ jobs:
             gh issue create \
               --repo "${{ github.repository }}" \
               --title "kwok scale guard failed ($tier tier): run ${{ github.run_id }}" \
-              --body "The $tier-tier kwok scale guard failed on $(date -u +%Y-%m-%d) at ${{ github.sha }}. Run: $run_url — the ladder TSV is in the scale-forensics artifact. The ceilings and what they mean are in .github/workflows/scale-kwok.yml and docs/leeway-design.md §6.6."
+              --body "The $tier-tier kwok scale guard failed on $(date -u +%Y-%m-%d) at ${{ github.sha }}. Run: $run_url — bench.tsv is in the scale-forensics artifact. The ceilings are in .github/workflows/scale-kwok.yml."
           fi

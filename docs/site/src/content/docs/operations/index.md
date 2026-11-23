@@ -32,14 +32,12 @@ is [Getting started → Deploy the sentinel](/getting-started/deploy/)):
   own deployment without paying for a second cache.
 - [Sizing & resource footprint](/operations/sizing/) — informer memory
   trimming, SQLite store bounds, and CPU/memory sizing by cluster scale.
-- [Placement drift (`topology-drift` & `compute-class`, deprecated)](/operations/placement/)
-  — legacy tuning reference for the deprecated in-tree leeway watch
-  sources; migrate placement sweeps to
-  [`go-steer/leeway`](https://github.com/go-steer/leeway) (`leeway report`)
-  and static `ComputeClass` checks to `lookout audit computeclass`.
-- [Standalone `leeway` exporter (deprecated)](/operations/leeway-standalone/)
-  — migration pointer from the deprecated in-tree `leeway` binary to
-  [`github.com/go-steer/leeway`](https://github.com/go-steer/leeway).
+
+Workload placement-skew and GKE `ComputeClass` fallback sweeps moved out
+of `lookout watch` to standalone
+[`go-steer/leeway`](https://github.com/go-steer/leeway) (`leeway report`,
+[#842](https://github.com/go-steer/k8s-lookout/issues/842)); static
+`ComputeClass` spec posture checks run via `lookout audit computeclass`.
 
 The generated [`lookout watch` flag table](/reference/watch/) and
 [Prometheus metrics reference](/reference/metrics/) are the authoritative

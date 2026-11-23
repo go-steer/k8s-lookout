@@ -342,9 +342,9 @@ func (f handlerFunc) OnAdd(any, bool)   { f() }
 func (f handlerFunc) OnUpdate(any, any) { f() }
 func (f handlerFunc) OnDelete(any)      { f() }
 
-// TestUnionFactory_ListerReadsEveryShard: the cross-namespace sources
-// (topology-drift's inventory, compute-class's shares, capacity's pending
-// pods) read through listers, and a union lister must answer for every
+// TestUnionFactory_ListerReadsEveryShard: cross-namespace consumers
+// (capacity's pending pods, storm correlation, object-state clearance)
+// read through listers, and a union lister must answer for every
 // shard — List across all of them, Get and per-namespace List routed to the
 // right one — and never for a namespace outside the scope.
 func TestUnionFactory_ListerReadsEveryShard(t *testing.T) {

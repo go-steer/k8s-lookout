@@ -34,12 +34,9 @@ import (
 // # Why this lives in pkg/kube
 //
 // It began in internal/watch, next to the sentinel's runner, which is where
-// the only factory used to be built. It is here now because it is not the
-// sentinel's property: cmd/leeway runs a single source outside the runner and
-// needs the identical transform, and §2.4 discipline 4 says that binary may not
-// import internal/watch. A transform reachable from only one of the two
-// binaries is how the standalone one came to cache resolved secret env values.
-// pkg/kube is what both may import, so this is where the one definition goes.
+// the only factory used to be built. Living in pkg/kube lets standalone
+// informer callers share the identical cache transform without importing
+// internal/watch.
 //
 // Read transform_registry.go before editing anything here. A transform on a
 // shared factory mutates objects every other consumer sees, and a nil slice is
@@ -120,20 +117,6 @@ var strippedAnnotations = map[string]bool{
 	"field.cattle.io/publicEndpoints":                        true,
 	"fluxcd.io/last-applied-configuration":                   true,
 	"kustomize.toolkit.fluxcd.io/last-applied-configuration": true,
-}
-
-// retainedNodeAnnotations is load-bearing, not cosmetic. GKE records the
-// provisioned compute-class priority in the `ccc_priority_index` annotation
-// (docs/leeway-design.md §7.7.2), so dropping it here would silently disable
-// preference-rank tracking with no error anywhere. Anything §7.7 depends on
-// must be listed.
-//
-// The key is unprefixed and GKE-internal: it is not in any published API, and
-// spike S1 measured it carrying non-numeric sentinels (`ccc_no_rule_matching`,
-// `ccc_scale_up_anyway`) and being absent for the first 33-44s of a node's life.
-// It is retained verbatim; interpreting it is the compute-class source's job.
-var retainedNodeAnnotations = map[string]bool{
-	"ccc_priority_index": true,
 }
 
 // trimPod drops fields no informer-reachable consumer reads, before the object
@@ -276,7 +259,8 @@ func trimNode(obj any) (any, error) {
 		return obj, nil
 	}
 	node.ManagedFields = nil
-	node.Annotations = filterKeys(node.Annotations, retainedNodeAnnotations)
+	node.Annotations = nil
+	node.Spec.Taints = nil
 	node.Status.Images = nil
 	node.Status.VolumesInUse, node.Status.VolumesAttached = nil, nil
 	node.Status.NodeInfo = corev1.NodeSystemInfo{}
@@ -320,24 +304,6 @@ func stripAppliedAnnotationsChecked(m map[string]string) (map[string]string, boo
 		}
 	}
 	return out, true
-}
-
-// filterKeys returns m reduced to the keys in keep, or nil if none survive.
-func filterKeys(m map[string]string, keep map[string]bool) map[string]string {
-	if len(m) == 0 {
-		return m
-	}
-	var out map[string]string
-	for k, v := range m {
-		if !keep[k] {
-			continue
-		}
-		if out == nil {
-			out = make(map[string]string, len(keep))
-		}
-		out[k] = v
-	}
-	return out
 }
 
 // retainConditions returns only the conditions whose type is in keep, in their

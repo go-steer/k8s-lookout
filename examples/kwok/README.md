@@ -37,11 +37,8 @@ Or step by step against the same isolated control plane:
 
 ```sh
 KWOKCTL_ETCD_QUOTA=32Gi examples/kwok/kwokctl-up  # tuned etcd + QPS-unlimited apiserver/controllers + 64 kwok pod workers
-examples/kwok/leeway-scale                        # rung 0 (empty cluster intercept)
 examples/kwok/scale-up 4000 5000 50               # 4,000 fake nodes, 5,000 workloads, 200,500 S8-padded pods
-examples/kwok/leeway-scale                        # quiet 200.5k-pod rung + marginal KiB/pod verdict
 examples/kwok/bench                               # all 26 read-path commands at 200.5k pods
-LEEWAY_SCALE_CHURN=24 examples/kwok/leeway-scale  # ~1,580 pod lifecycles/s rollout churn + #491 watch-event breakdown
 examples/kwok/kwokctl-down                        # tear down cluster & remove isolated kubeconfig
 ```
 
@@ -389,11 +386,9 @@ At **2,000 nodes / 100,500 S8-padded pods / 5,000 workloads** (`examples/kwok/kw
 | `audit` pod-aware detectors | `audit rbac -A` (`5.1s`, `1797.9M`, `133`, `ok`), `audit netpol -A` (`5.7s`, `1927.4M`, `5000`, `ok`), `audit hardening -A` (`7.8s`, `1734.7M`, `5000`, `ok`), `audit all -A` (`9.2s`, `1853.4M`, `20146`, `ok`) | Streaming naked-pod (`len(OwnerReferences)==0`) and active-pod-label extraction avoids materializing owned pods; `audit all` shares one `Snapshot` across all sub-audits. |
 | Multi-pass compositions | `health` (`9.2s`, `4131.6M`, `211501`, `ok` vs `30s`), `scan` (`13.3s`, `4245.0M`, `339663`, `ok` vs `120s`) | Singleflight pod/node list caching (`WithListCache`) across concurrent sub-checks deduplicates cluster-wide pod LISTs (`health` finishes under `10s`; `scan` sweeps `339,663` objects in `13.3s`). |
 
-On the same `100,500`-pod cluster, `kwokctl-run` also records both watch-path engines:
-- **`lookout watch --dry-run --sources=auto`:** `/readyz` in `22.1s`, `4454.3 MiB` peak `VmHWM` (`4433.0 MiB` steady `VmRSS`, `2834.0 MiB` Go heap in use), `0.71 core` steady-state CPU.
-- **`leeway-scale`:** `37.08 KiB/pod` marginal resident (`30.46 KiB/pod` Go heap, `60.4 MiB` empty-cluster intercept), `/readyz` in `19.0s` (`3699.3 MiB` peak RSS, `0.001 core` quiet); under 16 rollout drivers (`647.0` pod lifecycles/s, `31.66` evaluations/s), `1.26 core` whole-process (`0.57 core` evaluator share) and `p99 <= 100 ms` with `0` counter mismatches.
+On the same `100,500`-pod cluster, `kwokctl-run` also records `lookout watch --dry-run --sources=auto`: `/readyz` in `22.1s`, `4454.3 MiB` peak `VmHWM` (`4433.0 MiB` steady `VmRSS`, `2834.0 MiB` Go heap in use), `0.71 core` steady-state CPU.
 
-At the full **4,000 nodes / 200,500 S8-padded pods / 5,000 workloads** design target (`KWOKCTL_RUN_CHURN=24 examples/kwok/kwokctl-run 4000 5000 50`, `16,384 B` mean Pod, `21,061 B` mean Node, shipped defaults `--kube-qps=50 --kube-burst=100`), **26/26** read-path commands still pass `BENCH_REQUIRE_DEFAULT_TIMEOUT=1` inside their unchanged shipped `--timeout` defaults (`10s` / `30s` / `120s`):
+At the full **4,000 nodes / 200,500 S8-padded pods / 5,000 workloads** design target (`examples/kwok/kwokctl-run 4000 5000 50`, `16,384 B` mean Pod, `21,061 B` mean Node, shipped defaults `--kube-qps=50 --kube-burst=100`), **26/26** read-path commands still pass `BENCH_REQUIRE_DEFAULT_TIMEOUT=1` inside their unchanged shipped `--timeout` defaults (`10s` / `30s` / `120s`):
 
 | Command class | Measured at 200,500 pods (`ELAPSED`, `PEAK-MB`, `SCANNED`, `DEFAULT-TO`) | Why it holds at 200k+ |
 | --- | --- | --- |
@@ -403,95 +398,13 @@ At the full **4,000 nodes / 200,500 S8-padded pods / 5,000 workloads** design ta
 | `audit` pod-aware detectors | `audit rbac -A` (`7.5s`, `1520.8M`, `133`, `ok`), `audit ai -A` (`7.5s`, `1440.2M`, `5000`, `ok`), `audit netpol -A` (`7.9s`, `1706.9M`, `5000`, `ok`), `audit hardening -A` (`9.1s`, `1712.5M`, `5000`, `ok`), `audit all -A` (`11.7s`, `1694.3M`, `20146`, `ok` vs `30s`) | Concurrent `Snapshot.warm` + worker-mapped `scanPods` + lossless `MaskString` byte/substring pre-filters across `25,519` findings keep `audit hardening -A` inside `10s`. |
 | Multi-pass compositions | `scan` (`15.6s`, `6985.3M`, `645663`, `ok` vs `120s`), `health` (`16.4s`, `6844.7M`, `413501`, `ok` vs `30s`) | Per-batch COW edge slices in `pkg/graph` eliminate O(N²) hub-edge reallocation on `22,277`-pod namespaces (`default` SA / `default-deny` NetworkPolicy), bringing `health` from `44.7s` down to `16.4s`. |
 
-Watch-path engines at `4,000` nodes / `200,500` S8-padded pods:
+Watch-path sentinel at `4,000` nodes / `200,500` S8-padded pods:
 - **`lookout watch --dry-run --sources=auto`:** `/readyz` in **`43.8s`** (`7.6×` faster than before the `pkg/graph` hub-edge fix), **`6,772.5 MiB`** (`6.61 GiB`) peak `VmHWM` / `VmRSS`, **`5,587.3 MiB`** Go heap in use.
-- **`leeway-scale`:** **`28.80 KiB/pod`** marginal resident (`22.86 KiB/pod` Go heap, `57.9 MiB` intercept; `1M`-pod linear extrapolation = `27.52 GiB`), `/readyz` in **`40.7s`** (**`5,697.1 MiB`** quiet peak RSS, `0.001 core`, `p99 = 25.0 ms`); under `24` rollout drivers (**`1,578.5` pod lifecycles/s** = `3.16×` the `500/s` design target), **`1,893.4` watch events/s** (`#491`: `81.2%` applied, `18.8%` inert, `1.02` pod events/lifecycle, `79.7` events folded per evaluation), **`23.76` evaluations/s** (`p99 <= 100.0 ms`), **`1.3840 core`** whole-process (`0.5871 core` evaluator + `0.7969 core` ingest/GC), and `0` counter mismatches.
-
-## leeway-scale (deprecated — #842)
-
-> **Deprecated (#842):** In-tree `cmd/leeway` and the `topology-drift` /
-> `compute-class` watch sources are deprecated in favor of standalone
-> [`github.com/go-steer/leeway`](https://github.com/go-steer/leeway).
-> `examples/kwok/leeway-scale` remains in-tree during the Phase 1
-> deprecation window solely to keep `.github/workflows/scale-kwok.yml`
-> exercising the code until Phase 2 removes it.
-
-`bench` measures the read path — a command runs, answers and exits.
-`leeway-scale` measures the *watch* path, which is the one
-[leeway-design §6.6](../../docs/leeway-design.md) sets an NFR on: what
-the placement subsystem costs to hold a cluster in memory and to keep
-up with it changing.
-
-It runs the standalone `leeway` binary rather than `lookout watch`,
-and that is the point. Measuring one source's marginal cost inside a
-sentinel running eleven others measures the sentinel. Each run appends
-a row to `$STATE_DIR/leeway-scale.tsv` and reprints the ladder:
-
-```
-examples/kwok/leeway-scale            # rung 0, on the empty cluster
-examples/kwok/scale-up 400 4000 3
-examples/kwok/leeway-scale            # a loaded rung
-examples/kwok/leeway-scale --report   # just reprint
-```
-
-**Two rungs, not one.** A single measurement carries the fixed cost of
-an idle Go process inside it, so it cannot be divided by the pod count.
-The harness differences the extreme *quiet* rungs and reports the
-slope, which is the number §6.6 extrapolates from, plus the intercept,
-which is what the process costs before it caches anything.
-
-**Two axes, never mixed.** Memory is a function of object count and CPU
-is a function of event rate. A rung with no churn measures the first
-cleanly and honestly reports ~0.001 core for the second. Set
-`LEEWAY_SCALE_CHURN` to a number of parallel rollout drivers to get the
-second:
-
-```
-LEEWAY_SCALE_CHURN=12 LEEWAY_SCALE_WINDOW=90 examples/kwok/leeway-scale
-```
-
-Churn is `kubectl rollout restart`, not pod deletion. A delete puts
-kubectl on the critical path once per pod and tops out around seven
-lifecycles a second; a rollout is one API call the Deployment
-controller turns into `replicas` lifecycles at controller speed, and it
-is the event the subsystem exists to watch. The rate that lands in the
-ladder is **counted from the apiserver** — fleet pods whose
-`creationTimestamp` falls inside the window — not inferred from what
-the driver issued.
-
-**Mind the denominator.** Pod lifecycles are what the driver produces;
-they are not what the subsystem reacts to. One rollout is a Deployment
-write, a ReplicaSet create, a long tail of status updates and
-`replicas` pod lifecycles, and leeway re-evaluates on the Deployment
-write. So the report differences both `lookout_leeway_evaluation_duration_seconds`
-and `lookout_leeway_watch_events_total{resource,outcome}` ([#491](https://github.com/go-steer/k8s-lookout/issues/491)),
-giving the per-*evaluation* cost, the raw watch-event rate (`applied` vs `inert`
-share and `pod events / lifecycle`), the coalescer's `events / evaluation` folding
-ratio, and the end-to-end `µs / watch-event` split between ingest/GC and evaluation.
-
-Two optional ceilings turn the measurement into a regression guard,
-both off by default because a human taking a ladder wants the number
-rather than a verdict:
-
-| | |
-|---|---|
-| `LEEWAY_SCALE_MAX_KIB_PER_POD` | fail if the ladder's marginal resident cost exceeds this |
-| `LEEWAY_SCALE_MAX_P99_MS` | fail if this rung's evaluation p99 exceeds this |
-
-CI sets both; see [`.github/workflows/scale-kwok.yml`](../../.github/workflows/scale-kwok.yml),
-which takes rung 0 on the empty cluster, scales up and takes the second
-with the verdict attached.
-
-A rung whose fixtures are unpadded is not recorded, and neither is one
-that reported a counter mismatch — the first would quote a fleet of toy
-objects as a scale result, which is the specific mistake spike S8
-exists to prevent, and the second would quote the cost of a subsystem
-that was getting the answer wrong.
+- Placement and preference-rank scale benchmarks moved with leeway to [`github.com/go-steer/leeway`](https://github.com/go-steer/leeway) ([#842](https://github.com/go-steer/k8s-lookout/issues/842)).
 
 ## soak
 
-`leeway-scale` answers "what does it cost". `soak` answers the
-question §6.6.1 cannot: **does it stay there.**
+`bench` answers "what does it cost". `soak` answers: **does it stay there.**
 
 ```
 LEEWAY_SOAK_HOURS=2 examples/kwok/soak
@@ -502,11 +415,10 @@ examples/kwok/soak --selftest   # checks the verdict; needs no cluster
 This one runs `lookout watch` with the full source set, a resident
 `lookout mcp` HTTP server under periodic tool-call traffic
 (`LEEWAY_SOAK_MCP=1`), and periodic `lookout audit all -A | lookout
-findings diff --store=…` posture baselining (`LEEWAY_SOAK_AUDIT=1`),
-deliberately the opposite choice from `leeway-scale`: a leak is a
-property of the shipped processes and SQLite store, and a leak in the
-plumbing eleven sources, MCP sessions, or posture baseline writes share
-is still a leak an operator pages on. It churns the fleet throughout,
+findings diff --store=…` posture baselining (`LEEWAY_SOAK_AUDIT=1`): a
+leak is a property of the shipped processes and SQLite store, and a leak
+in the plumbing eleven sources, MCP sessions, or posture baseline writes
+share is still a leak an operator pages on. It churns the fleet throughout,
 samples RSS and Go heap every `LEEWAY_SOAK_SAMPLE` seconds, fits a
 least-squares slope over everything after `LEEWAY_SOAK_WARMUP` for
 both `lookout watch` and `lookout mcp`, and verifies that every posture

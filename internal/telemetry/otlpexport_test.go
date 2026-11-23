@@ -407,8 +407,8 @@ func TestExportSLIs_EveryFieldIsEnumerated(t *testing.T) {
 }
 
 // TestExportSLIDocs_MatchTheRegisteredCollectors ties the docs rows to
-// the real registry, the way topologydrift's MetricDocs test does: the
-// names on the generated metrics page are the names a scrape returns.
+// the real registry: the names on the generated metrics page are the
+// names a scrape returns.
 func TestExportSLIDocs_MatchTheRegisteredCollectors(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	for _, d := range ExportSLIDocs() {

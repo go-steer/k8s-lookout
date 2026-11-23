@@ -52,15 +52,15 @@ patches:
       name: lookout-watch
     patch: |-
       - op: test
-        path: /rules/24/resources
+        path: /rules/23/resources
         value: ["serviceaccounts"]
       - op: remove
-        path: /rules/24
+        path: /rules/23
       - op: test
-        path: /rules/23/resources
+        path: /rules/22/resources
         value: ["secrets"]
       - op: remove
-        path: /rules/23
+        path: /rules/22
   - target:
       kind: Deployment
       name: lookout-watch

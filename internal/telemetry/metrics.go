@@ -37,9 +37,8 @@ import (
 const MetricsExporterEnvVar = "OTEL_METRICS_EXPORTER"
 
 // DefaultPushInterval is how often the OTLP reader exports. One minute
-// matches the collection interval leeway's design assumes and keeps the
-// push path far cheaper than the scrape path, which is the one built
-// for sub-minute resolution.
+// keeps the push path far cheaper than the scrape path, which is the one
+// built for sub-minute resolution.
 const DefaultPushInterval = time.Minute
 
 // MetricsOptions configures SetupMetrics.
@@ -73,7 +72,7 @@ type MetricsOptions struct {
 }
 
 // SetupMetrics builds a MeterProvider that exports the SAME instruments
-// two ways (leeway design §8.4: "instrument once, export twice").
+// two ways ("instrument once, export twice": Prometheus pull + OTLP push).
 //
 // The pull reader is unconditional. Instruments declared on the OTel API
 // have to reach the /metrics endpoint the sentinel already serves
