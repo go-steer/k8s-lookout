@@ -42,12 +42,13 @@ func newBoardDispatcher(t *testing.T, base string, batch int, flush time.Duratio
 	if err != nil {
 		t.Fatalf("NewInjector: %v", err)
 	}
+	masked := MaskingSink(inj)
 	dedup, _ := engine.NewDedupCache(5*time.Minute, "")
 	m := newMetrics()
 	d := &dispatcher{
 		filter:   engine.NewFilter(engine.NewFilterConfig(nil, nil, nil, 0, 1, 0)),
 		dedup:    dedup,
-		injector: inj,
+		injector: masked,
 		metrics:  m,
 		cluster:  "prod-us-central1",
 		mode:     "per-incident",
@@ -55,7 +56,7 @@ func newBoardDispatcher(t *testing.T, base string, batch int, flush time.Duratio
 	}
 	clock := &boardClock{now: time.Date(2026, 7, 24, 11, 30, 0, 0, time.UTC)}
 	d.board = newWatchboard(watchboardConfig{
-		injector:      inj,
+		injector:      masked,
 		metrics:       m,
 		cluster:       "prod-us-central1",
 		batch:         batch,
@@ -417,10 +418,63 @@ func TestWatchboardDigest_ExactWireShape(t *testing.T) {
 	// Fingerprint(objectstate.restart_burst, restart_burst, Pod, "").
 	const fp = "sha256:e869fa95d9251a5a36fcceaa7e081d48faac44c90e719df563b2d784f723db70"
 	want := `{"kind":"watchboard.digest","cluster":"prod-us-central1","board_generation":1,"sequence":1,"window_start":"2026-07-24T11:30:00Z","window_end":"2026-07-24T11:30:00Z","entries":[` +
-		`{"kind":"objectstate.restart_burst","fingerprint":"` + fp + `","reason":"restart_burst","namespace":"shop","kind_of_object":"Pod","name":"cart-1","uid":"wuid-1","count":1,"first_seen":"2026-07-24T11:00:01Z","last_seen":"2026-07-24T11:00:01Z","reason_class":"CrashLoopBackOff"},` +
-		`{"kind":"objectstate.restart_burst","fingerprint":"` + fp + `","reason":"restart_burst","namespace":"shop","kind_of_object":"Pod","name":"cart-2","uid":"wuid-2","count":1,"first_seen":"2026-07-24T11:00:02Z","last_seen":"2026-07-24T11:00:02Z","reason_class":"CrashLoopBackOff"}]}`
+		`{"kind":"objectstate.restart_burst","fingerprint":"` + fp + `","reason":"restart_burst","namespace":"shop","kind_of_object":"Pod","name":"cart-1","uid":"wuid-1","count":1,"first_seen":"2026-07-24T11:00:01Z","last_seen":"2026-07-24T11:00:01Z","reason_class":"CrashLoopBackOff","message":"3 container restarts within 10m0s"},` +
+		`{"kind":"objectstate.restart_burst","fingerprint":"` + fp + `","reason":"restart_burst","namespace":"shop","kind_of_object":"Pod","name":"cart-2","uid":"wuid-2","count":1,"first_seen":"2026-07-24T11:00:02Z","last_seen":"2026-07-24T11:00:02Z","reason_class":"CrashLoopBackOff","message":"3 container restarts within 10m0s"}]}`
 	if got := messageOf(t, (*injects)[0].Body); got != want {
 		t.Errorf("digest payload drifted from the schema-stable wire shape:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestWatchboardDigest_MessagePopulatedCappedAndOmittedWhenEmpty is the
+// issue #846 regression test: warnings batched onto the watchboard must
+// carry their sanitized, length-capped message (<= 512 UTF-8 bytes on a
+// rune boundary) so the agent has actionable symptom text, while an
+// entry whose signal had an empty message omits the field cleanly.
+func TestWatchboardDigest_MessagePopulatedCappedAndOmittedWhenEmpty(t *testing.T) {
+	t.Parallel()
+	base, injects := newRoutingFakeDaemon(t)
+	d, _ := newBoardDispatcher(t, base, 3, time.Minute, 200)
+	d.board.injectMaxBytes = inject.MaxInjectBytes
+	ctx := context.Background()
+
+	s1 := warningSignal(1)
+	s1.Message = "pod readiness gate flipped 5 times within 15m0s without sustained failure"
+
+	s2 := warningSignal(2)
+	s2.Message = "x" + strings.Repeat("界", 250) // 751 UTF-8 bytes crossing a 3-byte rune boundary
+
+	s3 := warningSignal(3)
+	s3.Message = "" // omitempty: must not serialize `"message":""`
+
+	d.DispatchSignal(ctx, s1)
+	d.DispatchSignal(ctx, s2)
+	d.DispatchSignal(ctx, s3)
+
+	if len(*injects) != 1 {
+		t.Fatalf("want 1 digest inject, got %d", len(*injects))
+	}
+	wire := messageOf(t, (*injects)[0].Body)
+	var digest inject.WatchboardDigestPayload
+	if err := json.Unmarshal([]byte(wire), &digest); err != nil {
+		t.Fatalf("unmarshal digest: %v", err)
+	}
+	if len(digest.Entries) != 3 {
+		t.Fatalf("entries = %d, want 3", len(digest.Entries))
+	}
+	if digest.Entries[0].Message != s1.Message {
+		t.Errorf("entry[0].Message = %q, want %q", digest.Entries[0].Message, s1.Message)
+	}
+	if len(digest.Entries[1].Message) > inject.MaxWatchboardMessageBytes {
+		t.Errorf("entry[1].Message len = %d, want <= %d", len(digest.Entries[1].Message), inject.MaxWatchboardMessageBytes)
+	}
+	if !strings.HasSuffix(digest.Entries[1].Message, "…[truncated]") {
+		t.Errorf("entry[1].Message = %q, want …[truncated] suffix", digest.Entries[1].Message)
+	}
+	if digest.Entries[2].Message != "" {
+		t.Errorf("entry[2].Message = %q, want empty", digest.Entries[2].Message)
+	}
+	if strings.Contains(wire, `"message":""`) {
+		t.Errorf("empty message was not omitted on the wire: %s", wire)
 	}
 }
 

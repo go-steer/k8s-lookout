@@ -240,8 +240,8 @@ func TestWebhookDispatch_ExactWatchboardDigestWireShape(t *testing.T) {
 	}
 	const fp = "sha256:e869fa95d9251a5a36fcceaa7e081d48faac44c90e719df563b2d784f723db70" // Fingerprint(objectstate.restart_burst, restart_burst, Pod, "")
 	want := `{"kind":"watchboard.digest","cluster":"prod-us-central1","board_generation":1,"sequence":1,"window_start":"2026-07-24T11:30:00Z","window_end":"2026-07-24T11:30:00Z","entries":[` +
-		`{"kind":"objectstate.restart_burst","fingerprint":"` + fp + `","reason":"restart_burst","namespace":"shop","kind_of_object":"Pod","name":"cart-1","uid":"wuid-1","count":1,"first_seen":"2026-07-24T11:00:01Z","last_seen":"2026-07-24T11:00:01Z","reason_class":"CrashLoopBackOff"},` +
-		`{"kind":"objectstate.restart_burst","fingerprint":"` + fp + `","reason":"restart_burst","namespace":"shop","kind_of_object":"Pod","name":"cart-2","uid":"wuid-2","count":1,"first_seen":"2026-07-24T11:00:02Z","last_seen":"2026-07-24T11:00:02Z","reason_class":"CrashLoopBackOff"}]}`
+		`{"kind":"objectstate.restart_burst","fingerprint":"` + fp + `","reason":"restart_burst","namespace":"shop","kind_of_object":"Pod","name":"cart-1","uid":"wuid-1","count":1,"first_seen":"2026-07-24T11:00:01Z","last_seen":"2026-07-24T11:00:01Z","reason_class":"CrashLoopBackOff","message":"3 container restarts within 10m0s"},` +
+		`{"kind":"objectstate.restart_burst","fingerprint":"` + fp + `","reason":"restart_burst","namespace":"shop","kind_of_object":"Pod","name":"cart-2","uid":"wuid-2","count":1,"first_seen":"2026-07-24T11:00:02Z","last_seen":"2026-07-24T11:00:02Z","reason_class":"CrashLoopBackOff","message":"3 container restarts within 10m0s"}]}`
 	if got := (*hits)[0].Body; got != want {
 		t.Errorf("webhook digest open drifted from the frozen wire shape:\n got: %s\nwant: %s", got, want)
 	}

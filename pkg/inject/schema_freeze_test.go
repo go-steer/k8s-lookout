@@ -163,9 +163,14 @@ var frozenFields = map[string][]string{
 		"current_limit", "suggested_limit", "slope_per_day", "justification"},
 	"StormIncidentRef": {"fingerprint", "reason", "namespace",
 		"kind_of_object", "name", "uid", "session_id", "reason_class"},
+	// message added 2026-11-22 (issue #846), additive + omitempty and
+	// APPENDED: sanitized (emit.MaskString before truncation) and capped
+	// at inject.MaxWatchboardMessageBytes (512 UTF-8 bytes on a rune
+	// boundary, inclusive of "…[truncated]"). See docs/signal-schema-v1.md
+	// §Additive changes.
 	"WatchboardEntry": {"kind", "fingerprint", "reason", "namespace",
 		"kind_of_object", "name", "uid", "count", "first_seen", "last_seen",
-		"reason_class"},
+		"reason_class", "message"},
 }
 
 // jsonFields returns a struct type's json field names in declaration
@@ -381,6 +386,7 @@ var frozenFieldContracts = map[string][]fieldContract{
 		{"first_seen", reflect.Struct},
 		{"last_seen", reflect.Struct},
 		{"reason_class,omitempty", reflect.String},
+		{"message,omitempty", reflect.String},
 	},
 }
 
@@ -558,7 +564,7 @@ func TestSchemaV1_RoundTrip(t *testing.T) {
 			Entries: []inject.WatchboardEntry{{
 				Kind: rollout.KindStall, Fingerprint: "sha256:dd", Reason: "rollout_stall", ReasonClass: "rollout_stall",
 				Namespace: "prod", KindOfObject: "Deployment", Name: "web", UID: "u3",
-				Count: 2, FirstSeen: ts, LastSeen: ts,
+				Count: 2, FirstSeen: ts, LastSeen: ts, Message: "0/3 ready replicas for 10m0s",
 			}},
 		},
 		inject.WatchboardRotatedPayload{

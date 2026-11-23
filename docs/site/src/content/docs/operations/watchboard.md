@@ -26,14 +26,16 @@ created lazily on the first flush. Captured live in a validation drill:
 ```
 
 And the digest inject itself — one schema-stable record per flush, each
-entry carrying its own fingerprint and object coordinates:
+entry carrying its own fingerprint, object coordinates, and sanitized
+512-byte-capped message:
 
 ```json
 {"kind":"watchboard.digest","cluster":"kl-m2","board_generation":1,"sequence":1,
  "window_start":"2026-07-25T00:58:45.68219189Z","window_end":"2026-07-25T00:59:47.098792925Z",
  "entries":[{"kind":"objectstate.endpoints_empty","fingerprint":"sha256:638f0f4d…",
    "reason":"endpoints_empty","namespace":"weblab","kind_of_object":"Service",
-   "name":"web","uid":"052e28a1-…","count":1, …}]}
+   "name":"web","uid":"052e28a1-…","count":1,
+   "first_seen":"…","last_seen":"…","message":"0 ready endpoints (was 3)"}]}
 ```
 
 ## Rotation lifecycle

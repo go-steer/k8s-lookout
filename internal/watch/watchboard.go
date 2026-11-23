@@ -477,6 +477,13 @@ func (b *watchboard) digestPayload(now, windowStart time.Time, gen, injects int,
 			Count:        e.count,
 			FirstSeen:    e.sig.FirstSeen,
 			LastSeen:     e.sig.LastSeen,
+			// Sanitize BEFORE capping (#846, §6.5): a credential block
+			// (PEM key, JWT, URL userinfo) straddling the 512-byte cap
+			// would lose its closing delimiter if cut first and evade
+			// MaskString; sanitizeWatchboardMessage is also idempotent
+			// when MaskingSink runs on the outbound digest. ReasonClass
+			// above still reads the raw message.
+			Message: sanitizeWatchboardMessage(e.sig.Message),
 		})
 	}
 	payload := inject.WatchboardDigestPayload{

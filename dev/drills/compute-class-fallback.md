@@ -249,10 +249,10 @@ the message (`leeway.RankMessage`):
 - **`rank_degraded`:**
   - `reason=last-rank`, `kind_of_object=PreferenceAxis`,
     `name=leeway-fallback-probe`;
-  - it arrives as a `watchboard.digest` entry, and digest entries carry
-    no message. The rank arithmetic (*"… rank 1 share 1.00 is above the
-    ceiling 0.90 …"*) is on the episode, not the wire; read the
-    `alert_state` and share gauges from step 5 instead.
+  - it arrives as a `watchboard.digest` entry carrying the sanitized,
+    512-byte-capped message (*"… rank 1 share 1.00 is above the ceiling
+    0.90 …"*); the live `alert_state` and share gauges from step 5 show
+    the continuous window state alongside it.
 
 Neither part should produce `rank_no_migration` (rank 0 never came
 back) or `rank_tier_unused` (that needs 30 days of lifetime, and it is

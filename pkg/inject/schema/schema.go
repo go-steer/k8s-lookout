@@ -102,7 +102,7 @@ var kinds = []KindSpec{
 
 	// §7.7 watchboard kinds.
 	{inject.KindWatchboardDigest, inject.WatchboardDigestPayload{}, "",
-		"§7.7 warning-class batch flushed to the shared watchboard session (--watchboard-batch / --watchboard-flush)."},
+		"§7.7 warning-class batch flushed to the shared watchboard session (--watchboard-batch / --watchboard-flush); each entry carries its fingerprint, object coordinates, and sanitized 512-byte-capped message."},
 	{inject.KindWatchboardRotated, inject.WatchboardRotatedPayload{}, "",
 		"§15 Q2 size-based rotation pointer naming the successor watchboard session after --watchboard-rotate digests."},
 

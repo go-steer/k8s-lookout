@@ -419,7 +419,13 @@ strings (`"2m30s"`): fixed grammar, parseable without NLP (§9.3).
 
 Storm / watchboard / triage.regressed / family.member field sets: see
 the ledger in `schema_freeze_test.go` — reproduced there
-field-for-field with the same ordering the wire emits.
+field-for-field with the same ordering the wire emits. In particular,
+`WatchboardEntry` (`kind`, `fingerprint`, `reason`, `namespace`\*,
+`kind_of_object`, `name`, `uid`, `count`, `first_seen`, `last_seen`,
+`reason_class`\*, `message`\*) caps `message` at **`512` UTF-8 bytes**
+(`inject.MaxWatchboardMessageBytes = 512`) on a UTF-8 rune boundary,
+inclusive of the trailing `"…[truncated]"` marker when shortened, after
+passing the raw signal message through `emit.MaskString` (§6.5).
 
 ## §9.3 harvestability
 
@@ -585,6 +591,30 @@ first external consumer deploys.
   ignores it sees what it saw before, minus the duplicate opens. The
   ledger, the round-trip fixture and the reminder byte pin
   (`TestDispatchRepeat_ExactWireShape`) gained the field.
+- **2026-11-22 — `message` added to `WatchboardEntry` (#846):**
+  omitempty, APPENDED as the last field of `WatchboardEntry` (after
+  `reason_class`) per §Evolution, so every existing field keeps its
+  position and no fingerprint input changed. Previously `digestPayload`
+  read `Signal.Message` only to compute `reason_class` and dropped it
+  from the wire, leaving warning digests with bare object coordinates
+  and no symptom text. Each entry now carries the signal's message
+  sanitized first via `emit.MaskString` (§6.5 — run before truncation so
+  a PEM block, JWT, or URL credential straddling the cut boundary cannot
+  lose its closing delimiter and evade redaction) and capped at **`512`
+  UTF-8 bytes** (`inject.MaxWatchboardMessageBytes = 512`,
+  `inject.CapWatchboardMessage`) on a UTF-8 rune boundary, inclusive of
+  the `"…[truncated]"` suffix when shortened. Sources cap
+  `Signal.Message` at `2048` bytes for single-incident `Payload`s, which
+  would push a default `--watchboard-batch=5` digest past
+  `inject.MaxInjectBytes` (`8192`); `512` UTF-8 bytes keeps ordinary
+  leading-indicator messages whole while leaving a full 5-entry batch at
+  roughly 58% of the `8192`-byte ceiling before
+  `WatchboardDigestPayload.FitTo` ever drops oldest entries. Omitted
+  when the signal carried an empty message. The ledger, the round-trip
+  fixture, and the watchboard digest byte pins
+  (`TestWatchboardDigest_ExactWireShape`,
+  `TestWebhookDispatch_ExactWatchboardDigestWireShape`) gained the
+  trailing field.
 
 ## Evolution
 
