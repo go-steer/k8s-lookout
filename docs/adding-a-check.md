@@ -316,7 +316,16 @@ doc, and then:
   catches all of it; running only your package's tests does not.
 - **Lint findings pointing at a file that does not exist.** That is a stale
   shared golangci cache from another worktree. `golangci-lint cache clean`.
-- **A check that needs a CRD.** There is no read-path pattern for
-  discovery-gated CRD detectors yet (the sentinel has one, in
-  `pkg/sources/gateway`). Open a design issue rather than inventing a second
-  one.
+- **A check that needs a CRD.** Use `pkg/checks/crd` — the discovery-gated
+  unstructured reader seam. Fixed-group checks (`state gateway`, `state keda`)
+  resolve API-group availability via `crd.Resolver` (`Resolve(crd.Group)`),
+  degrade cleanly on clusters without the CRDs via `crd.EmitUnavailable`
+  (`kind=crd.unavailable`, exit 0, `scanned=0`; `crd.PartialNote` when a group
+  is partially served), and declare `crd.UnavailableKind()` and
+  `crd.UnavailableFields()` on the command; wildcard multi-group checks (`state
+  kcc` over `*.cnrm.cloud.google.com`) discover served groups via
+  `ServerPreferredResources()` and emit their own `*.unavailable` sentinel. Both
+  shapes list objects dynamically with `crd.ListAll` and read fields via
+  `crd.Str`/`Int`/`Slice`/`Map`/`Conditions`/`FindCondition` so third-party CRD
+  Go modules stay out of `go.mod` and optional reads stay out of
+  `state.LoadClusterListRequirements()`.

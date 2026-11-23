@@ -282,7 +282,7 @@ principal. The capability flags:
   `kind=resolved` is injected (default 5m).
 
 The generated [`lookout watch` reference](/reference/watch/) is the full
-table of all 57 flags, derived from the live flag surface.
+flag table, derived from the live flag surface.
 
 A battle-tested full-capability flag set — the exact args a live
 validation drill appended to the shipped set (drill-tuned values

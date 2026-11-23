@@ -15,34 +15,42 @@
 
 # Docs freshness linter — restored with the docs site (it was dropped
 # at M0 when there was no prose surface to guard). Mirrored from
-# core-agent's dev/tools/docs-lint, adapted to this tree: the
-# "tool count" rule becomes a "command count" rule (our drift-prone
-# invariant is the command surface, not a tool catalog) and the
-# pinned-install rule matches this module's path.
+# core-agent's dev/tools/docs-lint, adapted to this tree.
 #
-# Fails on the small set of drift patterns that go stale the moment
-# code lands. Not a spell-checker; not a style checker; not a
-# link-checker (scripts/verify-internal-links.py covers built-site
-# links in the Docs workflow). Just the four specific patterns.
+# Fails on drift patterns that go stale the moment code lands, plus
+# broken relative/internal Markdown links across README.md and docs/**.
 #
 # Checks:
-#   1. Numeric command counts   — "19 commands", "Nineteen commands", "19-command"
-#   2. Spelled image counts     — "three container variants", "four images", ...
-#   3. Pinned @vX.Y.Z installs  — `go install github.com/go-steer/k8s-lookout/...@v0.6.0`
-#   4. Wrong-major version pins — "as of v1.5", "Current release: v1.8.0"
-#                                 (this repo is pre-v1; any v1.X.Y prose claim
-#                                 is wrong today and rot-bait after v1)
+#   1. Numeric command counts      — "19 commands", "Nineteen commands", "19-command"
+#   2. Spelled image counts        — "three container variants", "four images", ...
+#   3. Pinned @vX.Y.Z installs     — `go install github.com/go-steer/k8s-lookout/...@v0.6.0`
+#   4. Wrong-major version pins    — "as of v1.5", "Current release: v1.8.0"
+#                                    (this repo is pre-v1; any v1.X.Y prose claim
+#                                    is wrong today and rot-bait after v1)
+#   5. Signal-source counts        — "nine signal sources", "11 sources", ...
+#   6. Wrong published domain      — `k8s-lookout.dev` across all repo Markdown
+#                                    (except CHANGELOG.md; site is published at
+#                                    https://go-steer.github.io/k8s-lookout/)
+#   7. Hardcoded flag counts       — "table of all 57 flags", "97 flags", ...
+#   8. Hardcoded scenario counts   — "ten inject/verify/revert failure scenarios", ...
+#   9. Stale/unguarded kind counts — "32-kind inventory", "48 signal kinds", ...
+#  10. Internal Markdown links     — scripts/verify-internal-links.py --markdown-only
+#                                    over README.md and docs/**
 #
 # Scope:
-#   README.md + docs/site/src/content/**/*.{md,mdx}. Nothing under
-#   docs/*.md at the top level (DESIGN.md and the milestone records
-#   are point-in-time documents), nothing under skills/ (generated
-#   stubs + playbooks with their own drift gates), nothing under
-#   CHANGELOG.md (version headers are the point).
+#   Prose-count rules (1–5, 7–9) scan root contributor/user docs (README.md,
+#   AGENTS.md, CONTRIBUTING.md, ROADMAP.md, SECURITY.md), living reference
+#   docs (docs/repo-map.md, docs/adding-a-check.md, docs/cli-stability-policy.md,
+#   docs/release-process.md, docs/signal-schema-v1.md,
+#   docs/audit-ingestion-contract.md, examples/README.md,
+#   deploy-namespaced/README.md, deploy/chart/README.md), and
+#   docs/site/src/content/**/*.{md,mdx}. Check 6 (wrong domain) scans every
+#   Markdown file in the repository except CHANGELOG.md, and Check 10 verifies
+#   internal Markdown links across README.md and docs/**.
 #
 # Usage:
 #   dev/tools/docs-lint             — scan the tree, exit 1 on any finding
-#   dev/tools/docs-lint --self-test — run against a synthetic fixture and
+#   dev/tools/docs-lint --self-test — run against synthetic fixtures and
 #                                     verify each rule fires (returns 0 if
 #                                     every check catches its pattern)
 
@@ -50,10 +58,124 @@ set -euo pipefail
 . "$(dirname "$0")/common.sh"
 cd "$(repo_root)"
 
+# ---- live tree counts (computed once from authoritative ledgers) ------
+
+LIVE_WATCH_FLAGS=$(grep -cvE '^(#|$)' internal/watch/testdata/watch_flags.golden || true)
+LIVE_SCENARIOS=$(find examples/scenarios -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+
+read -r LIVE_TOTAL_KINDS LIVE_ACTIVE_KINDS LIVE_RETIRED_KINDS < <(
+  python3 - pkg/inject/schema/schema.go <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    src = fh.read()
+
+# Strip line comments while preserving structure inside `var kinds = []KindSpec{ ... }`.
+clean_lines = []
+for line in src.splitlines():
+    in_str = False
+    esc = False
+    out = []
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        if line[i:i+2] == "//":
+            break
+        out.append(ch)
+        i += 1
+    clean_lines.append("".join(out))
+
+body_src = "\n".join(clean_lines)
+m = re.search(r"\bvar\s+kinds\s*=\s*\[\]KindSpec\s*\{([\s\S]*?)\n\}", body_src)
+if not m:
+    raise SystemExit("failed to locate `var kinds = []KindSpec{...}` in pkg/inject/schema/schema.go")
+
+block = m.group(1)
+# Extract each top-level `{ ... }` KindSpec literal inside the slice.
+entries = []
+depth = 0
+start = None
+in_str = False
+esc = False
+for idx, ch in enumerate(block):
+    if in_str:
+        if esc:
+            esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == '"':
+            in_str = False
+        continue
+    if ch == '"':
+        in_str = True
+        continue
+    if ch == "{":
+        if depth == 0:
+            start = idx
+        depth += 1
+    elif ch == "}":
+        depth -= 1
+        if depth == 0 and start is not None:
+            entries.append(block[start + 1:idx])
+            start = None
+
+active = 0
+retired = 0
+for entry in entries:
+    m_named = re.search(r"\bRetired\s*:\s*(true|false)\b", entry)
+    if m_named:
+        is_ret = m_named.group(1) == "true"
+    else:
+        m_pos = re.search(r",\s*(true|false)\s*,?\s*$", entry.strip())
+        if not m_pos:
+            raise SystemExit(f"cannot determine Retired bool for KindSpec entry: {entry!r}")
+        is_ret = m_pos.group(1) == "true"
+    if is_ret:
+        retired += 1
+    else:
+        active += 1
+
+print(f"{active + retired} {active} {retired}")
+PY
+)
+
+is_generated_site_doc() {
+  head -n 10 "$1" | grep -q 'Generated by dev/tools/gen-site-docs'
+}
+
 # ---- paths in scope ---------------------------------------------------
 
 scoped_paths() {
-  find README.md AGENTS.md CONTRIBUTING.md ROADMAP.md SECURITY.md docs/site/src/content -type f \( -name '*.md' -o -name '*.mdx' \) 2>/dev/null | sort
+  find \
+    README.md AGENTS.md CONTRIBUTING.md ROADMAP.md SECURITY.md \
+    docs/repo-map.md docs/adding-a-check.md docs/cli-stability-policy.md \
+    docs/release-process.md docs/signal-schema-v1.md docs/audit-ingestion-contract.md \
+    examples/README.md deploy-namespaced/README.md deploy/chart/README.md \
+    docs/site/src/content \
+    -type f \( -name '*.md' -o -name '*.mdx' \) 2>/dev/null | sort
+}
+
+all_markdown_except_changelog() {
+  find . \
+    \( -name .git -o -name .worktrees -o -name node_modules -o -name dist \) -prune -o \
+    -type f \( -name '*.md' -o -name '*.mdx' \) ! -path './CHANGELOG.md' -print | \
+    sed 's|^\./||' | sort
 }
 
 # ---- individual checks ------------------------------------------------
@@ -62,31 +184,19 @@ scoped_paths() {
 # "path:line: <message>" lines. No output = clean.
 
 # Check 1: numeric command counts.
-#
-# Fires on the drift shape "N commands" / "N-command surface" /
-# "Nineteen commands" — every new read-path command would rot the
-# number. Does NOT fire on path-like lines (tree-drawing chars,
-# embedded filenames) or on "command" used adjectivally after a
-# hyphenated word ("multi-command").
 check_command_counts() {
   local path="$1"
   awk -v p="$path" '
-    # Skip lines that look like directory-tree entries or contain a
-    # markdown/go filename — these are code-shaped, not prose.
     /^[ \t│├└─┌┐┘┴┬┼]+/ && /\.(md|go|yaml|yml|json|sh|ts|tsx|py)/ { next }
 
-    # Digit form, hyphenated: "19-command" only when the char after
-    # command[s] is a sentence delimiter.
     match($0, /(^|[^A-Za-z0-9])[0-9]+-commands?([ .,;:)]|$)/) {
       printf "%s:%d: numeric command count — list commands by group (triage / state / stab / …) instead of a count that drifts on every new command\n", p, NR
       next
     }
-    # Digit form, space-separated. Require PLURAL "commands".
     match($0, /(^|[^A-Za-z0-9])[0-9]+ commands\b/) {
       printf "%s:%d: numeric command count — list commands by group (triage / state / stab / …) instead of a count that drifts on every new command\n", p, NR
       next
     }
-    # Spelled form: Ten..Twenty [space or hyphen] command[s].
     match($0, /(^|[^A-Za-z])(Ten|Eleven|Twelve|Thirteen|Fourteen|Fifteen|Sixteen|Seventeen|Eighteen|Nineteen|Twenty)[- ]?commands?/) {
       printf "%s:%d: spelled command count — list commands by group (triage / state / stab / …) instead of a count that drifts on every new command\n", p, NR
     }
@@ -94,14 +204,8 @@ check_command_counts() {
 }
 
 # Check 2: spelled or numeric image-variant counts.
-#
-# Matches: three images / four container variants / 4-image ...
-# The release-images matrix is the ground truth; describing variants
-# by name is drift-safe.
 check_image_counts() {
   local path="$1"
-  # Skip logfmt-shaped lines (captured output): "revision=4 image=…"
-  # is a key=value pair, not a prose variant count.
   grep -n -E '\b(two|three|four|five|six|seven|[2-9]|1[0-9])[- ]?(container|image|variant)s?\b' "$path" 2>/dev/null | \
     grep -v -E '(^| )(container|image|variant)s?=' | \
     awk -F: -v p="$path" '{
@@ -110,11 +214,7 @@ check_image_counts() {
     }' || true
 }
 
-# Check 3: pinned @vX.Y.Z in a go get / go install snippet referencing
-# our own module. Use @latest (or a shell variable) instead.
-#
-# `go install github.com/go-steer/k8s-lookout/cmd/lookout@v0.6.0`  ← bad
-# `go install github.com/go-steer/k8s-lookout/cmd/lookout@latest`  ← good
+# Check 3: pinned @vX.Y.Z in a go get / go install snippet referencing our module.
 check_pinned_installs() {
   local path="$1"
   grep -n -E 'go (get|install)\s+github\.com/go-steer/k8s-lookout[^ ]*@v[0-9]+\.[0-9]+\.[0-9]+' "$path" 2>/dev/null | \
@@ -125,20 +225,6 @@ check_pinned_installs() {
 }
 
 # Check 4: wrong-major (v1.X.Y) prose version claims.
-#
-# This repo is pre-v1: any prose claim of a v1.X.Y release is wrong
-# today, and once v1 lands the same patterns become the rot-bait
-# core-agent's rule exists for. v0.X.Y appears only in CHANGELOG
-# (out of scope) and the milestone records (out of scope), never in
-# the scanned prose — keep it that way by describing releases as
-# "the current release" and linking the tag list.
-#
-# Accepted forms (allow-listed):
-#   `## [1.X.Y]` in CHANGELOG-shape section headers
-#   `(since v1.X.Y)` — intentional "this feature landed in" annotation
-#   `pre-v1.X.Y`    — intentional "before this version" annotation
-#   `post-v1.X.Y`   — intentional "after this version" annotation
-#   `v1.X.Y+`       — "since vX or later"
 check_wrong_major_pins() {
   local path="$1"
   grep -n -E '\bv1\.[0-9]+\.[0-9]+\b' "$path" 2>/dev/null | \
@@ -154,12 +240,6 @@ check_wrong_major_pins() {
 }
 
 # Check 5: numeric or spelled signal-source counts in prose.
-#
-# Catches "nine signal sources", "nine §7.2 sources", "11 sources" in
-# unguarded prose so documentation does not rot when sources are added.
-# Allow-lists "of the <N> sources are never auto-enabled" in sentinel.md,
-# which is verified directly against Go's knownSources registry by
-# TestCoverageMapExplicitOnlyCount (internal/watch/coveragedoc_test.go).
 check_source_counts() {
   local path="$1"
   grep -n -E '\b(seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|[7-9]|1[0-9])[- ]+(§7\.2 )?(signal )?sources\b' "$path" 2>/dev/null | \
@@ -168,6 +248,297 @@ check_source_counts() {
       msg = "hard-coded source count — describe sources by role or link §7.2 instead of a count that drifts";
       printf "%s:%s: %s\n", p, $1, msg
     }' || true
+}
+
+# Check 6: wrong site domain (`k8s-lookout.dev`).
+check_wrong_domain() {
+  local path="$1"
+  grep -n -E 'k8s-lookout\.dev' "$path" 2>/dev/null | \
+    awk -F: -v p="$path" '{
+      msg = "wrong docs domain k8s-lookout.dev — use https://go-steer.github.io/k8s-lookout/ (docs/site/astro.config.mjs)";
+      printf "%s:%s: %s\n", p, $1, msg
+    }' || true
+}
+
+# Check 7: hardcoded CLI / watch flag counts in prose (including soft line wraps).
+#
+# Catches drift-prone totals ("table of all 57 flags", "97 flags",
+# "97 configuration flags", "97 `lookout watch` flags", "57-flag").
+# Allow-lists the permanently frozen M0 predecessor count ("the 19
+# predecessor flags" in docs/cli-stability-policy.md, pinned by
+# TestFlagSurfaceFrozen) and local 2–4 flag tuples ("Two flags select",
+# "behind three flags").
+check_flag_counts() {
+  local path="$1"
+  is_generated_site_doc "$path" && return 0
+
+  python3 - "$path" "$LIVE_WATCH_FLAGS" <<'PY'
+import re
+import sys
+
+path, live = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as fh:
+    raw = fh.read()
+
+lines = []
+fence = None
+for line in raw.splitlines():
+    m = re.match(r"^\s*(`{3,}|~{3,})", line)
+    if m:
+        tok = m.group(1)
+        if fence is None:
+            fence = (tok[0], len(tok))
+            lines.append("")
+            continue
+        if tok[0] == fence[0] and len(tok) >= fence[1] and re.match(r"^\s*" + re.escape(tok[0]) * len(tok) + r"\s*$", line):
+            fence = None
+            lines.append("")
+            continue
+    lines.append("" if fence is not None else line)
+text = "\n".join(lines)
+
+WS = r"(?:[ \t]|\n(?![ \t]*(?:$|[#|>*-]|\d+\.)))+"
+MOD = r"(?:`[^`\n]+`|[A-Za-z][A-Za-z0-9_/-]*)"
+NUM_ALL = r"(?:\d+|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:-[a-z]+)?"
+NUM_5PLUS = r"(?:[5-9]|[1-9]\d+|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:-[a-z]+)?"
+
+FLAG_RE = re.compile(
+    rf"(?<![.\d])(?:"
+    rf"\b(?:all|every){WS}{NUM_ALL}(?:{WS}{MOD}){{0,2}}{WS}flags\b"
+    rf"|\b{NUM_5PLUS}(?:-|{WS})(?:{MOD}{WS}){{0,2}}flags\b"
+    rf"|\b(?:[5-9]|[1-9]\d+)-flag\b"
+    rf")",
+    re.I | re.M,
+)
+
+for m in FLAG_RE.finditer(text):
+    ctx_slice = re.sub(r"\s+", " ", text[max(0, m.start() - 10):min(len(text), m.end() + 25)]).lower()
+    if "19 predecessor flags" in ctx_slice:
+        continue
+    lineno = text.count("\n", 0, m.start()) + 1
+    print(
+        f"{path}:{lineno}: hard-coded flag count (watch_flags.golden currently has {live}) "
+        f"— link /reference/watch/ without a count that drifts"
+    )
+PY
+}
+
+# Check 8: hardcoded scenario counts in prose (including soft line wraps).
+check_scenario_counts() {
+  local path="$1"
+  is_generated_site_doc "$path" && return 0
+
+  python3 - "$path" "$LIVE_SCENARIOS" <<'PY'
+import re
+import sys
+
+path, live = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as fh:
+    raw = fh.read()
+
+lines = []
+fence = None
+for line in raw.splitlines():
+    m = re.match(r"^\s*(`{3,}|~{3,})", line)
+    if m:
+        tok = m.group(1)
+        if fence is None:
+            fence = (tok[0], len(tok))
+            lines.append("")
+            continue
+        if tok[0] == fence[0] and len(tok) >= fence[1] and re.match(r"^\s*" + re.escape(tok[0]) * len(tok) + r"\s*$", line):
+            fence = None
+            lines.append("")
+            continue
+    lines.append("" if fence is not None else line)
+text = "\n".join(lines)
+
+WS = r"(?:[ \t]|\n(?![ \t]*(?:$|[#|>*-]|\d+\.)))+"
+NUM = r"(?:[2-9]|[1-9]\d+|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty)(?:-[a-z]+)?"
+SCENARIO_RE = re.compile(
+    rf"(?<![.\d])\b{NUM}(?:-|{WS})(?:(?:inject/verify/revert|failure|e2e|kind|replay|demo|test){WS})*scenarios?\b",
+    re.I | re.M,
+)
+
+for m in SCENARIO_RE.finditer(text):
+    lineno = text.count("\n", 0, m.start()) + 1
+    print(
+        f"{path}:{lineno}: hard-coded scenario count (examples/scenarios/ currently has {live} dirs) "
+        f"— link examples/scenarios/ without a count that drifts"
+    )
+PY
+}
+
+# Check 9: stale or unguarded signal/finding kind counts in hand-written prose
+# (with fenced-code stripping and soft line-wrap support).
+#
+# Generated pages (docs/site reference/signal-kinds.md, detect/scan.md) are
+# verified directly against checks.All() and schema.Kinds() by internal/sitedoc.
+# In hand-written docs:
+#   - `v1: <N> reserved names — <A> active + <R> retired` (signal-schema-v1.md),
+#   - `<N>-kind inventory` (repo-map.md),
+#   - `<A> active + <R> retired [= <N> reserved v1 names]` (repo-map.md, signal-schema-v1.md),
+#   - `— <N> in the frozen schema —` (sentinel.md), and
+#   - `<R> `leeway.*` wire kinds retired` (signal-schema-v1.md)
+#   MUST match pkg/inject/schema/schema.go's live ledger
+#   ($LIVE_TOTAL_KINDS = $LIVE_ACTIVE_KINDS active + $LIVE_RETIRED_KINDS retired).
+#   - Any other numeric or spelled `<N> [signal|finding|...] kinds` or `<N>-kind`
+#     (including across soft line wraps) is rejected.
+check_kind_counts() {
+  local path="$1"
+  is_generated_site_doc "$path" && return 0
+
+  python3 - "$path" "$LIVE_TOTAL_KINDS" "$LIVE_ACTIVE_KINDS" "$LIVE_RETIRED_KINDS" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+want_total = int(sys.argv[2])
+want_active = int(sys.argv[3])
+want_retired = int(sys.argv[4])
+
+WORDS = {
+    "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+    "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+    "eighty": 80, "ninety": 90,
+}
+
+with open(path, encoding="utf-8") as fh:
+    raw = fh.read()
+
+# Blank out fenced code blocks while preserving line numbers.
+lines = []
+fence = None
+for line in raw.splitlines():
+    m = re.match(r"^\s*(`{3,}|~{3,})", line)
+    if m:
+        tok = m.group(1)
+        if fence is None:
+            fence = (tok[0], len(tok))
+            lines.append("")
+            continue
+        if tok[0] == fence[0] and len(tok) >= fence[1] and re.match(r"^\s*" + re.escape(tok[0]) * len(tok) + r"\s*$", line):
+            fence = None
+            lines.append("")
+            continue
+    lines.append("" if fence is not None else line)
+text = "\n".join(lines)
+
+WS = r"(?:[ \t]|\n(?![ \t]*(?:$|[#|>*-]|\d+\.)))+"
+
+V1_HEADER_RE = re.compile(
+    rf"(?<![.\d])\bv1:{WS}(\d+){WS}reserved{WS}names{WS}—{WS}(\d+){WS}active{WS}\+{WS}(\d+){WS}retired\b",
+    re.I,
+)
+INV_RE = re.compile(rf"(?<![.\d])\b(\d+)-kind{WS}inventory\b", re.I)
+SPLIT_RE = re.compile(
+    rf"(?<![.\d])\b(\d+){WS}active{WS}\+{WS}(\d+){WS}retired(?:{WS}={WS}(\d+){WS}reserved{WS}v1{WS}names)?\b",
+    re.I,
+)
+FROZEN_SCHEMA_RE = re.compile(rf"—{WS}(\d+){WS}in{WS}the{WS}frozen{WS}schema{WS}—", re.I)
+RETIRED_HEADER_RE = re.compile(
+    rf"(?<![.\d])\b([a-z]+|\d+){WS}`leeway\.\*`{WS}wire{WS}kinds{WS}retired\b",
+    re.I,
+)
+GENERIC_KIND_RE = re.compile(
+    rf"(?<![.\d])\b(?:\d+|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    rf"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+    rf"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:-[a-z]+)?"
+    rf"(?:-kinds?\b|{WS}(?:(?:signal|finding|declared|shipped|frozen|v1|wire|audit|posture){WS})*kinds\b)",
+    re.I,
+)
+ALLOW_PHRASES_RE = re.compile(
+    rf"\bkinds{WS}of\b|\bfour{WS}RBAC{WS}kinds\b|\bthese{WS}eight{WS}kinds\b",
+    re.I,
+)
+
+
+def blank_preserve_nl(s: str, rx: re.Pattern[str]) -> str:
+    return rx.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), s)
+
+
+findings: list[tuple[int, str]] = []
+rest = text
+
+# 1. `v1: <N> reserved names — <A> active + <R> retired` (signal-schema-v1.md heading).
+for m in V1_HEADER_RE.finditer(rest):
+    got_t, got_a, got_r = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if (got_t, got_a, got_r) != (want_total, want_active, want_retired):
+        ln = rest.count("\n", 0, m.start()) + 1
+        findings.append((
+            ln,
+            f"{path}:{ln}: stale v1 kind inventory header ({got_t} reserved = {got_a} active + {got_r} retired; "
+            f"pkg/inject/schema/schema.go has {want_total} = {want_active} active + {want_retired} retired)",
+        ))
+rest = blank_preserve_nl(rest, V1_HEADER_RE)
+
+# 2. `<N>-kind inventory` (repo-map.md).
+for m in INV_RE.finditer(rest):
+    got = int(m.group(1))
+    if got != want_total:
+        ln = rest.count("\n", 0, m.start()) + 1
+        findings.append((
+            ln,
+            f"{path}:{ln}: stale schema kind count {got}-kind inventory "
+            f"(pkg/inject/schema/schema.go has {want_total}: {want_active} active + {want_retired} retired)",
+        ))
+rest = blank_preserve_nl(rest, INV_RE)
+
+# 3. `<A> active + <R> retired [= <N> reserved v1 names]`.
+for m in SPLIT_RE.finditer(rest):
+    got_a, got_r = int(m.group(1)), int(m.group(2))
+    got_t = int(m.group(3)) if m.group(3) else got_a + got_r
+    if (got_a, got_r, got_t) != (want_active, want_retired, want_total):
+        ln = rest.count("\n", 0, m.start()) + 1
+        findings.append((
+            ln,
+            f"{path}:{ln}: stale schema kind split {got_a} active + {got_r} retired = {got_t} "
+            f"(pkg/inject/schema/schema.go has {want_active} active + {want_retired} retired = {want_total})",
+        ))
+rest = blank_preserve_nl(rest, SPLIT_RE)
+
+# 4. `— <N> in the frozen schema —` (sentinel.md).
+for m in FROZEN_SCHEMA_RE.finditer(rest):
+    got = int(m.group(1))
+    if got != want_total:
+        ln = rest.count("\n", 0, m.start()) + 1
+        findings.append((
+            ln,
+            f"{path}:{ln}: stale frozen-schema kind count {got} "
+            f"(pkg/inject/schema/schema.go has {want_total})",
+        ))
+rest = blank_preserve_nl(rest, FROZEN_SCHEMA_RE)
+
+# 5. `<R> `leeway.*` wire kinds retired` (signal-schema-v1.md).
+for m in RETIRED_HEADER_RE.finditer(rest):
+    tok = m.group(1).lower()
+    got = int(tok) if tok.isdigit() else WORDS.get(tok, -1)
+    if got != want_retired:
+        ln = rest.count("\n", 0, m.start()) + 1
+        findings.append((
+            ln,
+            f"{path}:{ln}: stale retired kind count {m.group(1)} "
+            f"(pkg/inject/schema/schema.go has {want_retired} retired kinds)",
+        ))
+rest = blank_preserve_nl(rest, RETIRED_HEADER_RE)
+
+# 6. Exclude allowed English phrases and reject all remaining unguarded kind counts.
+rest = blank_preserve_nl(rest, ALLOW_PHRASES_RE)
+for m in GENERIC_KIND_RE.finditer(rest):
+    ln = rest.count("\n", 0, m.start()) + 1
+    findings.append((
+        ln,
+        f"{path}:{ln}: hard-coded kind count — point to pkg/inject/schema "
+        f"or /reference/finding-kinds/ instead of an unguarded count that drifts",
+    ))
+
+findings.sort(key=lambda item: item[0])
+for _, msg in findings:
+    print(msg)
+PY
 }
 
 # ---- driver -----------------------------------------------------------
@@ -183,12 +554,32 @@ run_all_checks() {
       check_pinned_installs "$path"
       check_wrong_major_pins "$path"
       check_source_counts "$path"
+      check_flag_counts "$path"
+      check_scenario_counts "$path"
+      check_kind_counts "$path"
     )
     if [[ -n "$out" ]]; then
       printf '%s\n' "$out"
       findings=$((findings + $(printf '%s\n' "$out" | wc -l)))
     fi
   done < <(scoped_paths)
+
+  # Wrong-domain check scans every Markdown file in the repo except CHANGELOG.md.
+  while IFS= read -r md_path; do
+    [[ -z "$md_path" ]] && continue
+    local dom_out
+    dom_out=$(check_wrong_domain "$md_path")
+    if [[ -n "$dom_out" ]]; then
+      printf '%s\n' "$dom_out"
+      findings=$((findings + $(printf '%s\n' "$dom_out" | wc -l)))
+    fi
+  done < <(all_markdown_except_changelog)
+
+  local link_out
+  if ! link_out=$(python3 scripts/verify-internal-links.py --markdown-only 2>&1); then
+    printf '%s\n' "$link_out"
+    findings=$((findings + 1))
+  fi
 
   if (( findings > 0 )); then
     echo ""
@@ -200,10 +591,6 @@ run_all_checks() {
 }
 
 # ---- self-test --------------------------------------------------------
-#
-# Writes a fixture into a temp dir, points the scan at it, and verifies
-# every rule fires at least once. Used by anyone editing this script to
-# confirm the rules still catch what they should.
 
 self_test() {
   local tmp
@@ -220,6 +607,17 @@ Nineteen commands are registered by default.
 We ship two container images: `lookout` and `lookout-gke`.
 The sentinel runs nine signal sources out of the box.
 
+See [Finding kinds](https://k8s-lookout.dev/reference/finding-kinds/).
+The reference is the full table of all 57 flags.
+It also has 97 `lookout watch` flags and 97 configuration flags.
+Examples includes ten inject/verify/revert
+failure scenarios wrapped across two lines, plus 30 scenarios.
+Frozen ledger: 32-kind inventory and 48
+signal kinds wrapped across lines.
+## Kind inventory (v1: 59 reserved names — 52 active + 8 retired in #842)
+Also pinned (51 active + 8
+retired = 58 reserved v1 names).
+
 Install with:
 
 ```
@@ -229,9 +627,26 @@ go install github.com/go-steer/k8s-lookout/cmd/lookout@v0.6.0
 Current release: v1.8.0.
 EOF
 
+  cat > "$tmp/clean.md" <<EOF
+# Clean fixture
+
+### 3.2 Kinds and reasons
+
+Two flags select which lists run, behind three flags on MCP, plus the 19 predecessor flags.
+A suite has five kinds of test and reads the four RBAC kinds.
+## Kind inventory (v1: ${LIVE_TOTAL_KINDS} reserved names — ${LIVE_ACTIVE_KINDS} active + ${LIVE_RETIRED_KINDS} retired in #842)
+Ledger: ${LIVE_TOTAL_KINDS}-kind inventory: ${LIVE_ACTIVE_KINDS} active + ${LIVE_RETIRED_KINDS} retired.
+Pinned (${LIVE_ACTIVE_KINDS} active + ${LIVE_RETIRED_KINDS}
+retired = ${LIVE_TOTAL_KINDS} reserved v1 names).
+
+\`\`\`
+# Fenced code mentioning 2 kinds or 57 flags is ignored by prose checks.
+\`\`\`
+
+See [Finding kinds](https://go-steer.github.io/k8s-lookout/reference/finding-kinds/).
+EOF
+
   local out=0
-  # Run each check directly against the fixture and confirm it produces
-  # at least one finding line. Failure of any check → self-test failure.
   local n
   n=$(check_command_counts "$tmp/fixture.md" | wc -l)
   (( n >= 1 )) || { echo "self-test: check_command_counts fired 0 times, expected ≥1"; out=1; }
@@ -248,8 +663,38 @@ EOF
   n=$(check_source_counts "$tmp/fixture.md" | wc -l)
   (( n >= 1 )) || { echo "self-test: check_source_counts fired 0 times, expected ≥1"; out=1; }
 
+  n=$(check_wrong_domain "$tmp/fixture.md" | wc -l)
+  (( n >= 1 )) || { echo "self-test: check_wrong_domain fired 0 times, expected ≥1"; out=1; }
+
+  n=$(check_flag_counts "$tmp/fixture.md" | wc -l)
+  (( n >= 3 )) || { echo "self-test: check_flag_counts fired $n times, expected ≥3"; out=1; }
+
+  n=$(check_scenario_counts "$tmp/fixture.md" | wc -l)
+  (( n >= 2 )) || { echo "self-test: check_scenario_counts fired $n times, expected ≥2"; out=1; }
+
+  n=$(check_kind_counts "$tmp/fixture.md" | wc -l)
+  (( n >= 4 )) || { echo "self-test: check_kind_counts fired $n times, expected ≥4"; out=1; }
+
+  local clean_out
+  clean_out=$(
+    check_wrong_domain "$tmp/clean.md"
+    check_flag_counts "$tmp/clean.md"
+    check_scenario_counts "$tmp/clean.md"
+    check_kind_counts "$tmp/clean.md"
+  )
+  if [[ -n "$clean_out" ]]; then
+    echo "self-test: unexpected false positive on clean fixture:"
+    printf '%s\n' "$clean_out"
+    out=1
+  fi
+
+  if ! python3 scripts/verify-internal-links.py --self-test >/dev/null; then
+    echo "self-test: verify-internal-links.py --self-test failed"
+    out=1
+  fi
+
   if (( out == 0 )); then
-    echo "docs-lint self-test: OK (all 5 rules fired on the fixture)"
+    echo "docs-lint self-test: OK (all 9 rules + internal link self-test passed)"
   fi
   return $out
 }
