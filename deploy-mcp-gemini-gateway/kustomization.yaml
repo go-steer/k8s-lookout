@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# DEPRECATED: use deploy-mcp-gemini/, which is now the Gateway overlay
-# (the Ingress variant was dropped). This directory shipped in v0.37.0
-# as the Gateway variant and stays as an alias that builds exactly
-# deploy-mcp-gemini/, so a kustomization pointing here keeps working;
-# it will be removed in a later release.
+# DEPRECATED: use deploy/mcp/, which is the Gateway MCP deployment (#852;
+# previously aliased deploy-mcp-gemini/ since v0.38.0). Kept as a
+# compatibility alias that renders identically.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - ../deploy-mcp-gemini
+  - ../deploy/mcp

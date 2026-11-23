@@ -1,4 +1,4 @@
-{{- if and .Values.rbac.create (include "lookout.namespaceScope" .) .Values.rbac.nodes }}
+{{- if and (not (include "lookout.mcpMode" .)) .Values.rbac.create (include "lookout.namespaceScope" .) .Values.rbac.nodes }}
 # ---------------------------------------------------------------------
 # SOURCE OF TRUTH: deploy-namespaced/clusterrole-watcher-nodes.yaml and
 # clusterrolebinding-watcher-nodes.yaml (#407). The namespace tier's one

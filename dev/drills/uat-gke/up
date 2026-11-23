@@ -76,7 +76,7 @@ k -n "$NS_RUNNER" create serviceaccount lookout-uat --dry-run=client -o yaml | k
 k -n "$NS_RUNNER" annotate serviceaccount lookout-uat --overwrite \
   "iam.gke.io/gcp-service-account=$runner_email" >/dev/null
 # The shipped read grants, so the run exercises the real ClusterRole.
-k apply -f "$here/../../../deploy/12-clusterrole-watcher.yaml" >/dev/null
+k apply -f "$here/../../../deploy/base/12-clusterrole-watcher.yaml" >/dev/null
 k create clusterrolebinding lookout-uat --clusterrole lookout-watch \
   --serviceaccount "$NS_RUNNER:lookout-uat" --dry-run=client -o yaml | k apply -f - >/dev/null
 

@@ -223,7 +223,7 @@ def starlight_route_exists(
 
 
 def iter_markdown_files(repo_root: pathlib.Path) -> list[pathlib.Path]:
-    """Return `README.md` and every Markdown/MDX file under `docs/**`."""
+    """Return `README.md`, `docs/**/*.{md,mdx}`, and `deploy*/**/*.md`."""
     files: list[pathlib.Path] = []
     readme = repo_root / "README.md"
     if readme.is_file():
@@ -235,6 +235,10 @@ def iter_markdown_files(repo_root: pathlib.Path) -> list[pathlib.Path]:
                 rel_parts = p.relative_to(repo_root).parts
                 if "node_modules" in rel_parts or "dist" in rel_parts:
                     continue
+                files.append(p)
+    for d in sorted(repo_root.glob("deploy*")):
+        if d.is_dir():
+            for p in d.rglob("*.md"):
                 files.append(p)
     return sorted(set(files))
 

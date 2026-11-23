@@ -12,45 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# lookout mcp for a Gemini Enterprise app (#699): every tool call reads
-# as the person who made it, with their own Google token, so what they
-# see is what their own Kubernetes RBAC and Cloud IAM allow. Standalone:
-# use it beside deploy/ (or without it), not on top of it.
-#
-#   kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-mcp-gemini?ref=vX.Y.Z"
-#
-# Edit config.yaml first (domain, OAuth client ID, allow-lists), or set
-# the values from your own kustomization (a configMapGenerator merge plus
-# the domain component; see domain/). The full walk-through, from OAuth client
-# to the Gemini Enterprise data store, is the "Gemini Enterprise" page of
-# the docs site.
-#
-# What it creates in agent-triage:
-#   - ServiceAccount lookout-mcp, with NO RBAC and no Workload Identity:
-#     lookout's own identity reads nothing.
-#   - Deployment lookout-mcp: two stateless replicas of
-#     `lookout mcp --google-client-id ...` on :8383, one per zone, the
-#     triage and audit tool profiles plus six incident reads, minus
-#     findings diff (it needs a store), the access log on stdout.
-#   - Service, Gateway, HTTPRoute, HealthCheckPolicy and GCPBackendPolicy:
-#     a GKE global external Application Load Balancer, HTTPS only, on the
-#     reserved global static IP lookout-mcp-ip, with TLS from the
-#     Certificate Manager map lookout-mcp (gateway.yaml names both; set
-#     your own there or patch them). The cluster needs the Gateway API
-#     (Autopilot has it; Standard: --gateway-api=standard).
-#
-# Not included: the sentinel store. Store-backed tools (triage status,
-# history via --at) need --store on a file this pod can read; with the
-# sentinel's store on a ReadWriteOnce volume, that means running lookout
-# mcp in the sentinel's pod instead.
+# DEPRECATED (#852): use deploy/mcp/ instead (docs/cli-stability-policy.md
+# deprecation window). Kept as a compatibility alias that renders identically.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - config.yaml
-  - mcp.yaml
-  - gateway.yaml
-
-# DOMAIN, set once in config.yaml, is also the route's hostname
-# (domain/).
-components:
-  - domain
+  - ../deploy/mcp

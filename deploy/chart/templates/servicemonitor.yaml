@@ -1,4 +1,4 @@
-{{- if .Values.serviceMonitor.enabled }}
+{{- if and (not (include "lookout.mcpMode" .)) .Values.serviceMonitor.enabled }}
 {{- if not .Values.service.create }}
 {{- fail "serviceMonitor.enabled requires service.create — a ServiceMonitor with no Service selects nothing and reports no error" }}
 {{- end }}

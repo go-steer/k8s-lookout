@@ -101,10 +101,10 @@ payload on stdout; diagnostics go to stderr only.
 
 ## Quickstart — sentinel
 
-The watch-path deploys per cluster via Kustomize from [`deploy/`](./deploy/) or via Helm from [`deploy/chart`](./deploy/chart):
+The watch-path deploys per cluster via Kustomize from [`deploy/base/`](./deploy/base/) (with composable `Component`s under [`deploy/components/`](./deploy/README.md)) or via Helm from [`deploy/chart`](./deploy/chart):
 
 ```sh
-kubectl apply -k deploy/
+kubectl apply -k deploy/base/
 # or via Helm:
 helm install lookout ./deploy/chart -n lookout-system --create-namespace
 ```
@@ -113,7 +113,7 @@ That gives the sentinel a dedicated ServiceAccount with a
 minimum-necessary, **read-only** ClusterRole (it observes; all
 mutations happen through the core-agent daemon's own permission gate).
 Point `--daemon-url` at your core-agent daemon in
-`deploy/51-deployment-watcher.yaml`. Namespace-scoped (Role-only) and
+`deploy/base/51-deployment-watcher.yaml` (or compose `deploy/components/sink-ax/` / pass `--set sink.type=ax` or `--set sink.type=webhook`). Namespace-scoped (Role-only) and
 project-tier (quota source, `-gke` image) deployments are covered in
 DESIGN.md §11 — sources whose RBAC scope isn't satisfied fail loudly at
 startup, never as a silently empty watch.

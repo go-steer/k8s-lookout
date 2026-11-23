@@ -18,5 +18,5 @@
 . "$(dirname "$0")/../lib.sh"
 require_examples_context
 
-kubectl delete -f "$(repo_root)/deploy/" --ignore-not-found
+kubectl delete -k "$(repo_root)/deploy/" --ignore-not-found
 kubectl delete namespace "$SENTINEL_NS" --ignore-not-found

@@ -14,17 +14,19 @@ wrong flavor with nothing to catch it.
      with a summary paragraph (this section becomes the Release
      notes verbatim — compose-release-notes.sh extracts it and fails
      the release if it is missing).
-   - `deploy/51-deployment-watcher.yaml`: bump the image pin to
-     `vX.Y.Z`. The release workflow's preflight guard refuses to tag
-     on a stale pin.
-   - `deploy-mcp-gemini/mcp.yaml`: the same version in its `-gke` pin,
-     `vX.Y.Z-gke` (a standalone overlay, so it has its own).
-     `dev/tools/verify-helm-parity` fails CI if it disagrees with
-     deploy/51.
+   - `deploy/base/51-deployment-watcher.yaml` (and its root compatibility
+     copy `deploy/51-deployment-watcher.yaml`): bump the image pin to
+     `vX.Y.Z`. Both `dev/tools/verify-helm-parity` and `rbac_test.go` fail
+     CI if the compatibility copy drifts from `deploy/base/51`, and the
+     release workflow's tag preflight guard checks the pin before tagging.
+   - `deploy/mcp/mcp.yaml` (and its legacy compatibility copy
+     `deploy-mcp-gemini/mcp.yaml`): the same version in its `-gke` pin,
+     `vX.Y.Z-gke`. `dev/tools/verify-helm-parity` and `rbac_test.go` fail
+     CI if either copy disagrees with `deploy/base/51-deployment-watcher.yaml`.
    - `deploy/chart/Chart.yaml`: `appVersion: "vX.Y.Z"` and
      `version: X.Y.Z` (the chart version tracks the app version, no
      leading `v`). `dev/tools/verify-helm-parity` fails CI on any
-     disagreement between these two and the deploy/51 pin.
+     disagreement between these two and the `deploy/base/51` pin.
    - `docs/site/src/content/docs/getting-started/deploy.md`: bump the
      `?ref=vX.Y.Z` in the `kubectl apply -k` line, and the
      `--version X.Y.Z` + `charts/lookout:X.Y.Z` in the Helm block.

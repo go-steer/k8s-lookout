@@ -1,25 +1,29 @@
 # lookout — Helm chart
 
-Deploys the `lookout watch` sentinel: a single-replica, read-only
-watcher that turns Kubernetes state changes into triage signals and
-posts them to a core-agent daemon.
+Deploys either the `lookout watch` sentinel (`mode: watch`, the default)
+or the shared `lookout mcp` Gateway server (`mode: mcp`).
 
-This chart is a parameterization of `deploy/*.yaml`, not a second
-description of the deployment. `dev/tools/verify-helm-parity` renders
-both and diffs them in CI:
+This chart is a parameterization of [`deploy/base/`](../base/),
+[`deploy/components/`](../README.md), and [`deploy/mcp/`](../mcp/), not a
+second description of the deployment. `dev/tools/verify-helm-parity`
+renders both and diffs them in CI:
 
 ```
 helm template lookout-watch deploy/chart -n agent-triage
-  ==  kustomize build deploy/
+  ==  kustomize build deploy/base/
 ```
 
 With default values the two are identical, resource for resource and
 field for field, modulo the three provenance labels Helm stamps on
 everything (`helm.sh/chart`, `app.kubernetes.io/managed-by`,
-`app.kubernetes.io/version`). If you are reading a manifest to
-understand what a flag or an RBAC rule is for, read the one under
-`deploy/` — the rationale comments live there, and the templates carry
-only a pointer back.
+`app.kubernetes.io/version`). The same parity suite diffs `--set
+sink.type=ax`, `--set rbac.secrets=false`, `--set rbac.scope=namespace`,
+`--set rbac.probeFrom=true`, composed Kustomize component combinations,
+and `--set mode=mcp` (with and without `--set mcp.oauth.enabled=true`).
+If you are reading a manifest to understand what a flag or an RBAC rule
+is for, read the one under `deploy/base/` or `deploy/mcp/` — the
+rationale comments live there, and the templates carry only a pointer
+back.
 
 ## Install
 
@@ -90,7 +94,20 @@ run. For anything beyond a value or two, write a values file.
 
 ## Values worth knowing about
 
-**`image.flavor`.** The default image links zero GCP SDKs. If you enable
+**`mode`.** `watch` (default) deploys the `lookout watch` sentinel;
+`mcp` deploys the stateless `lookout mcp` Gateway server (matching
+`deploy/mcp/`, using the `-gke` image flavor by default via
+`mcp.imageFlavor`, plus `mcp.oauth.enabled=true` for generic MCP client
+OAuth matching `deploy/mcp/oauth`).
+
+**`sink.type`.** Selects the sentinel's incident delivery sink in `watch`
+mode:
+- `core-agent` (default) — posts to `--daemon-url` in `args` using `daemonToken`.
+- `ax` — switches to `--sink=ax`, renders a content-hashed `ConfigMap` from `sink.ax.taskTemplate`, and mounts the Agent Substrate v0.6+ router mTLS projected volumes (`sink.ax.routerMTLS=true`), matching `deploy/components/sink-ax/`.
+- `webhook` — switches to `--sink=webhook --sink-url=<sink.webhook.url>`, omits core-agent session flags (`--daemon-url`, `--owner`, `--token-env`, `--mode`), and wires optional bearer auth when `sink.webhook.tokenSecretName` is set.
+
+**`image.flavor`.** The default image links zero GCP SDKs in `watch`
+mode. If you enable
 the quota source you need the `-gke` flavor: `--set image.flavor=gke`
 appends the suffix to the chart's appVersion, or pin `image.tag`
 outright.
@@ -139,9 +156,11 @@ volumes, so every auto-enabled source except expiry keeps
 working. `rbac.nodes=false` is the strictly namespaced tier. It has no
 ClusterRole at all, drops the capacity Role, and turns `--storm=on` into
 `--storm=auto`. The two tiers are the same deployments as the
-`deploy-namespaced/` and `deploy-namespaced-strict/` overlays, and CI
-diffs each pair. `deploy-namespaced/README.md` has the table of which
-sources survive each tier.
+`deploy/components/scope-namespaced/` and
+`deploy/components/scope-namespaced-strict/` components (and their legacy
+`deploy-namespaced*` aliases), and CI diffs each pair.
+[`deploy/components/scope-namespaced/README.md`](../components/scope-namespaced/README.md)
+has the table of which sources survive each tier.
 
 **`networkPolicy.extraIngressFrom`.** The default rule admits scrapers
 in the release namespace. Prometheus in `monitoring/`, or GMP in

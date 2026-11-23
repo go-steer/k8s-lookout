@@ -1,4 +1,4 @@
-{{- if and .Values.rbac.create (include "lookout.namespaceScope" .) }}
+{{- if and (not (include "lookout.mcpMode" .)) .Values.rbac.create (include "lookout.namespaceScope" .) }}
 {{- $namespaces := .Values.rbac.namespaces | default (list .Release.Namespace) }}
 {{- range $i, $ns := $namespaces }}
 {{- if $i }}

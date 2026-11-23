@@ -1,0 +1,61 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lookout-watch
+spec:
+  template:
+    spec:
+      containers:
+        - name: watcher
+          volumeMounts:
+            - name: lookout-data
+              mountPath: /var/lib/lookout
+            - name: ax-task
+              mountPath: /etc/lookout/ax
+              readOnly: true
+            - name: podidentity
+              mountPath: /run/podidentity.podcert.ate.dev
+              readOnly: true
+            - name: servicedns-ca
+              mountPath: /run/servicedns-ca
+              readOnly: true
+      volumes:
+        - name: lookout-data
+        - name: ax-task
+          configMap:
+            name: lookout-ax-task
+        # The router client certificate: a PKCS#8 key followed by the
+        # chain, rewritten by the kubelet as it rotates (24h lifetime,
+        # refreshed 30 min before expiry). lookout re-reads it.
+        - name: podidentity
+          projected:
+            sources:
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
+        # The authorities the router's certificate chains to. Only the
+        # live bundle: a canaried CA joins it when Substrate promotes it.
+        - name: servicedns-ca
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: trust-bundle.pem

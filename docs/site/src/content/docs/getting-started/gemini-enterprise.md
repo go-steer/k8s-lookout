@@ -90,7 +90,7 @@ Fetch the overlay, edit `config.yaml`, and apply it:
 
 ```bash
 git clone --depth 1 --branch vX.Y.Z https://github.com/go-steer/k8s-lookout
-cd k8s-lookout/deploy-mcp-gemini
+cd k8s-lookout/deploy/mcp
 $EDITOR config.yaml        # DOMAIN, GOOGLE_CLIENT_ID, GOOGLE_ALLOW, GOOGLE_ALLOW_WRITE (+ GOOGLE_GROUPS_SERVICE_ACCOUNT for groups)
 kubectl apply -k .
 ```
@@ -99,7 +99,10 @@ Two names in `gateway.yaml` are yours too, if they differ from the
 defaults above: the static IP (`NamedAddress`, `lookout-mcp-ip`) and the
 certificate map (the `networking.gke.io/certmap` annotation,
 `lookout-mcp`). The cluster needs the Gateway API (Autopilot has it;
-on Standard, `--gateway-api=standard`).
+on Standard, `--gateway-api=standard`). (The Helm chart deploys the same
+objects via `helm install lookout-mcp ./deploy/chart -n agent-triage
+--set mode=mcp`, and the legacy `deploy-mcp-gemini/` directory stays as
+a compatibility alias.)
 
 Or keep the overlay remote and set everything from your own
 kustomization. Set the `config.yaml` values with a `configMapGenerator`
@@ -109,9 +112,9 @@ lands early enough for the component to copy your value instead.
 
 ```yaml
 resources:
-  - github.com/go-steer/k8s-lookout/deploy-mcp-gemini?ref=vX.Y.Z
+  - github.com/go-steer/k8s-lookout/deploy/mcp?ref=vX.Y.Z
 components:
-  - github.com/go-steer/k8s-lookout/deploy-mcp-gemini/domain?ref=vX.Y.Z
+  - github.com/go-steer/k8s-lookout/deploy/mcp/domain?ref=vX.Y.Z
 configMapGenerator:
   - name: lookout-mcp
     namespace: agent-triage

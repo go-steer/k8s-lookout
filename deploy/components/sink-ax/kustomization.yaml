@@ -1,0 +1,62 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Kustomize Component switching `lookout watch` to the AX sink
+# (docs/ax-sink-design.md) with Substrate v0.6+ router mTLS (#809, #852):
+#
+#   resources:
+#     - github.com/go-steer/k8s-lookout/deploy/base?ref=vX.Y.Z
+#   components:
+#     - github.com/go-steer/k8s-lookout/deploy/components/sink-ax?ref=vX.Y.Z
+#
+# Composes cleanly with `no-secrets`, `scope-namespaced`,
+# `scope-namespaced-strict`, and `probe-from`. Helm: `sink.type=ax`.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - local-config.yaml
+configMapGenerator:
+  - name: lookout-ax-task
+    namespace: agent-triage
+    files:
+      - task.yaml
+patches:
+  - target:
+      kind: Deployment
+      name: lookout-watch
+    path: patch-deployment.yaml
+  - target:
+      kind: Deployment
+      name: lookout-watch
+    patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/name
+        value: watcher
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --ax-server=ax-server.ax-system.svc:8080
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --ax-task-template=/etc/lookout/ax/task.yaml
+replacements:
+  - source:
+      kind: ConfigMap
+      name: lookout-component-sink-ax
+      fieldPath: data.sink
+    targets:
+      - select:
+          kind: Deployment
+          name: lookout-watch
+        fieldPaths:
+          - spec.template.spec.containers.[name=watcher].args.[=--daemon-url=]

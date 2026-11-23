@@ -1,0 +1,229 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The sentinel Deployment (`lookout watch`). Watches Kubernetes Events
+# via the local kube-apiserver, filters + dedupes, and POSTs matched
+# events to the core-agent daemon's session inject endpoint.
+#
+# The ghcr.io/go-steer/lookout image's ENTRYPOINT is
+# ["/lookout", "watch"], so the bare-flag `args:` below splice in
+# behind `watch`. NEW deployments from this manifest get the full
+# capability surface EXPLICITLY: every
+# portable source plus token-burn pinned in `args:` (explicit lists
+# make a missing grant a loud startup FAILURE, §11 — the right
+# posture when this manifest's RBAC is applied alongside), storm
+# correlation on, and the occurrence store on a volume. Note the
+# binary's own defaults are `--sources=auto --storm=auto`
+# (probe-and-enable: misses are skipped with a loud line instead of
+# failing) — a manifest that pins nothing still gets everything the
+# deployment's RBAC supports.
+#
+# Runs as a SEPARATE Deployment from the daemon (not a sidecar
+# container in the daemon's pod) so:
+#   - operators can scale the two independently
+#   - a sentinel restart doesn't restart the daemon (and vice-versa)
+#   - additional sentinels in remote clusters follow the same shape
+#     (this manifest is the template — copy + change --cluster-name +
+#     --daemon-url to add coverage of another cluster)
+#
+# Talks to the local daemon via the core-agent Service on port 7777.
+# For remote clusters, override --daemon-url to
+# https://<external-daemon-endpoint>:7777.
+#
+# IMAGE FLAVORS (M4 drill observation 5): the default
+# ghcr.io/go-steer/lookout:<version> image is GCP-FREE by design
+# (DESIGN.md §2 — no cloud SDK linked; conformance-tested), so
+# `--sources=…,quota` in it REFUSES at startup, loudly and correctly,
+# and the capacity source runs without the provider scale-decision
+# sub-source. Project-tier deployments (§11: the ONE sentinel per GCP
+# project that enables the quota source, §10.2) must pin the
+# `-tags allproviders` flavor instead:
+#
+#   image: ghcr.io/go-steer/lookout:<version>-gke   # or :latest-gke
+#
+# Same binary, same flags, same signing (cosign verify works
+# identically); only the compiled-in cloud provider differs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lookout-watch
+  namespace: agent-triage
+  labels:
+    app.kubernetes.io/name: lookout-watch
+    app.kubernetes.io/component: watcher
+spec:
+  replicas: 1
+  # Recreate, not the default RollingUpdate: with replicas: 1 a rolling
+  # update starts the new pod before terminating the old one, so every
+  # rollout briefly runs two sentinels watching the same cluster and
+  # double-emitting every signal. Recreate trades a few seconds of
+  # downtime for that, which is the right way round for a watcher —
+  # a gap in coverage is recoverable, duplicate incidents are noise
+  # someone has to triage.
+  #
+  # This fixes the rollout case only. A node failure, an eviction, or a
+  # manual scale-up still produces two sentinels; leader election is the
+  # real answer and is tracked separately.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lookout-watch
+      app.kubernetes.io/component: watcher
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lookout-watch
+        app.kubernetes.io/component: watcher
+    spec:
+      serviceAccountName: lookout-watch
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: watcher
+          # Pinned to the CURRENT release (issue #146 — it sat at
+          # v0.1.0 for eleven releases). The release-cut commit bumps
+          # this pin (docs/release-process.md), and the release
+          # workflow's preflight guard refuses to tag when it is
+          # stale.
+          image: ghcr.io/go-steer/lookout:v0.44.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          args:
+            - "--daemon-url=http://core-agent.agent-triage.svc.cluster.local:7777"
+            - "--token-env=WATCHER_TOKEN"
+            - "--mode=per-incident"
+            - "--owner=sre-oncall@example.com"
+            - "--cluster-name=local"
+            - "--dedup-window=5m"
+            - "--in-cluster"
+            - "--metrics-addr=:9090"
+            - "--log-level=info"
+            # Sources ride the binary default (--sources=auto): probe
+            # each portable source's grants at startup and enable what
+            # this deployment supports, skipping misses with one loud
+            # line each. Auto is what lets this manifest run unchanged
+            # on platforms that deny a permission to every principal
+            # (GKE Autopilot's Warden vs nodes/proxy, issue #145) —
+            # an explicit list would make that miss fatal. Strict §11
+            # fail-fast deployments pin the list explicitly instead:
+            #   - "--sources=k8s-events,object-state,rollout,workload,autoscaling,saturation,degradation,expiry,capacity,ingress,gateway,token-burn"
+            # (token-burn is auto-excluded — add it explicitly when
+            # the --daemon-url cost stack should be watched; quota
+            # additionally needs the -gke image, see IMAGE FLAVORS.)
+            - "--storm=on"
+            # Occurrence store (§9.1): info-signal persistence, graph
+            # history (--at post-mortems), triage-status records.
+            - "--store=/var/lib/lookout/lookout.db"
+            # FailedScheduling autoscaler-verdict gate (#835, experimental):
+            # active automatically whenever the capacity source is enabled
+            # (defaults: --failedscheduling-min-count=5,
+            # --failedscheduling-min-span=2m, --scaleup-hold=15m,
+            # --autopilot-scale-to-zero-hold=true). Disable all four knobs
+            # to restore event-#1 pass-through:
+            #   - "--failedscheduling-min-count=1"
+            #   - "--failedscheduling-min-span=0"
+            #   - "--scaleup-hold=0"
+            #   - "--autopilot-scale-to-zero-hold=false"
+            # Alert-exclude rules (#836, experimental): mount a ConfigMap
+            # holding `excludes:` rules as a directory (do NOT use subPath —
+            # Kubernetes does not propagate ConfigMap updates to subPath
+            # mounts, which breaks hot-reload) and point --alert-excludes at
+            # it. Matching signals downgrade to severity=info (persisted in
+            # --store above) without dropping the namespace from the watch;
+            # hot-reloaded every 1m and on SIGHUP. Incompatible with --mode=shared.
+            #   - "--alert-excludes=/etc/lookout/alert-excludes.yaml"
+            # Settle gate (#834, experimental): opt-in duration (default 0 /
+            # off) requiring canonical CrashLoopBackOff and allowlisted
+            # transient Failed startup-race events to span at least --settle
+            # (LastSeen - FirstSeen) after crossing count debounce before
+            # forwarding; reports forwarded vs self_resolved on
+            # lookout_watch_gate_outcomes_total{gate="settle"}.
+            #   - "--settle=2m"
+          volumeMounts:
+            - name: lookout-data
+              mountPath: /var/lib/lookout
+          env:
+            - name: WATCHER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: lookout-watch-token
+                  key: token
+            # Keep at ~80% of limits.memory. Without it the Go heap grows
+            # until the kernel OOM-kills the process, which loses the
+            # store's in-flight writes and every watch; with it the GC
+            # gets aggressive first, which is slow but survivable. The
+            # downward API cannot do arithmetic, so this tracks the limit
+            # below by hand — move them together.
+            - name: GOMEMLIMIT
+              value: "600MiB"
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          # Sized from the measured per-object cache cost, not from a
+          # round number: a trimmed pod is 18,630 B of retained heap on
+          # GKE and a node 5,308 B, so the top of the 1-15k pod range
+          # lookout calls typical is ~275 MiB of object cache before
+          # anything else allocates. 256Mi ran out at ~14k pods.
+          # See Operations -> Sizing for the table and the levers.
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "768Mi"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          # /readyz, not /healthz: liveness asks whether the process is
+          # up, readiness asks whether it has established its watches.
+          # The sentinel spends its first seconds listing every
+          # informer's world and is blind until they sync, which is
+          # exactly the window a rollout must not cut over into.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        # The occurrence store's home. emptyDir is the zero-friction
+        # default: the store is telemetry, never control flow, so
+        # losing it on pod reschedule costs history, not correctness.
+        # For durable post-mortems (--at queries across restarts,
+        # `triage changes`), swap in the PVC below — the image is
+        # distroless (no tar), so `kubectl cp` off a live pod does NOT
+        # work; a PVC you can mount from a debug pod is the practical
+        # way to copy the store out.
+        - name: lookout-data
+          emptyDir: {}
+        # PVC alternative (create the claim first):
+        # - name: lookout-data
+        #   persistentVolumeClaim:
+        #     claimName: lookout-data

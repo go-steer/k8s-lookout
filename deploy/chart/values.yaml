@@ -13,25 +13,33 @@
 # limitations under the License.
 
 # Defaults here are not "sensible-looking values someone picked for the
-# chart". They are the values in deploy/*.yaml, and
+# chart". They are the values in deploy/base/*.yaml, and
 # dev/tools/verify-helm-parity fails if that stops being true:
 #
 #   helm template lookout-watch deploy/chart -n agent-triage
-#     ==  kustomize build deploy/
+#     ==  kustomize build deploy/base/
 #
-# So the raw manifests remain the single reviewed description of how the
-# sentinel is deployed, and the chart is a parameterization of it rather
+# So the raw manifests remain the single reviewed description of how
+# lookout is deployed, and the chart is a parameterization of it rather
 # than a second opinion. When you change a manifest, run the parity
 # check; it will tell you exactly which chart template drifted.
 
-# -- Image. The default flavor links zero GCP SDKs. Project-tier
+# -- Operating mode (#852):
+#   - watch (default): resident per-cluster `lookout watch` sentinel
+#     (parity-tested against deploy/base/ and deploy/components/*)
+#   - mcp: stateless `lookout mcp` HTTP server with per-caller Google
+#     OAuth (parity-tested against deploy/mcp/ and deploy/mcp/oauth)
+mode: watch
+
+# -- Image. The default flavor links zero GCP SDKs in `watch` mode (and
+# defaults to `gke` in `mcp` mode via `mcp.imageFlavor`). Project-tier
 # deployments that enable the quota source need the `-gke` flavor:
 # set `image.tag: v0.44.0-gke`, or `image.flavor: gke` to append the
 # suffix to whatever appVersion the chart ships with.
 image:
   repository: ghcr.io/go-steer/lookout
   # Empty means .Chart.AppVersion, which the release cut keeps in step
-  # with deploy/51's pin.
+  # with deploy/base/51-deployment-watcher.yaml's pin.
   tag: ""
   flavor: ""
   pullPolicy: IfNotPresent
@@ -39,6 +47,83 @@ imagePullSecrets: []
 
 nameOverride: ""
 fullnameOverride: ""
+
+# -- Incident delivery sink for `mode: watch` (#852;
+# docs/agent-sink-design.md, docs/ax-sink-design.md):
+#   - core-agent (default): POST /sessions + /sessions/<sid>/inject to
+#     --daemon-url in `args`, authenticating via `daemonToken`
+#   - webhook: generic HTTP receiver (--sink=webhook --sink-url=<url>);
+#     omits core-agent-only session flags (--daemon-url, --owner,
+#     --token-env, --mode) and uses optional `sink.webhook.tokenSecretName`
+#   - ax: Agent Executor tasks on Agent Substrate (--sink=ax + ConfigMap
+#     task template + Substrate v0.6+ router mTLS volumes), matching
+#     deploy/components/sink-ax/
+sink:
+  type: core-agent
+  webhook:
+    # Required when sink.type=webhook (unless --dry-run is passed).
+    url: ""
+    # Optional Secret for --sink-token-env bearer authentication.
+    tokenSecretName: ""
+    tokenSecretKey: token
+    tokenEnvVar: SINK_TOKEN
+  ax:
+    server: ax-server.ax-system.svc:8080
+    # Optional pre-existing ConfigMap holding `task.yaml`. When empty, the
+    # chart renders one from `taskTemplate` below with a content-hash suffix.
+    existingTaskConfigMap: ""
+    # Mount the Substrate v0.6+ podidentity + servicedns-ca projected
+    # volumes for router mTLS (#809). Set false only with an http://
+    # --ax-router-url on Substrate v0.5 or earlier.
+    routerMTLS: true
+    taskTemplate: |
+      # Copyright 2026 Google LLC
+      #
+      # Licensed under the Apache License, Version 2.0 (the "License");
+      # you may not use this file except in compliance with the License.
+      # You may obtain a copy of the License at
+      #
+      #     http://www.apache.org/licenses/LICENSE-2.0
+      #
+      # Unless required by applicable law or agreed to in writing, software
+      # distributed under the License is distributed on an "AS IS" BASIS,
+      # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+      # See the License for the specific language governing permissions and
+      # limitations under the License.
+
+
+      # The AX Task every incident runs as (--ax-task-template), and the
+      # cluster's watchboard task when --ax-watchboard-task-template is unset.
+      # The ax sink sets metadata.name per task and changes nothing else;
+      # templates are decoded strictly at startup, so a typo fails `lookout
+      # watch` at once.
+      #
+      # Replace the image with your agent's (it must serve core-agent's
+      # session API, POST /sessions and /sessions/<sid>/inject, on http.port),
+      # and the egress rules with what it needs to reach.
+      apiVersion: ax.io/v1alpha1
+      kind: Task
+      metadata:
+        atespace: default
+      spec:
+        image: REGISTRY/AGENT-IMAGE@sha256:REPLACE-ME
+        # Limits only: Substrate sizes a sandbox by limits, and AX refuses
+        # requests. Unset, AX gives every task 1 CPU and 512Mi, which is more
+        # CPU and less memory than a triage agent wants.
+        resources:
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        # One Workspace (git repos, files, MCP and skills config) bound at
+        # /workspace, created with `ax apply`. Singular since the AX API that
+        # lookout v0.43 speaks; the old `workspaces:` list is refused. Leave it
+        # out for an empty working directory.
+        # workspace:
+        #   name: triage
+        http:
+          port: 8484
+        idle:
+          suspendAfter: 10m
 
 serviceAccount:
   # Set false when the ServiceAccount is managed outside the chart —
@@ -269,3 +354,66 @@ priorityClassName: ""
 extraEnv: []
 extraVolumes: []
 extraVolumeMounts: []
+
+# -- `lookout mcp` server configuration, rendered when `mode: mcp` (#852).
+# Parity-tested against `deploy/mcp/` (and `deploy/mcp/oauth` when
+# `mcp.oauth.enabled=true`) with release name `lookout-mcp`.
+mcp:
+  # Default image flavor when `image.flavor` and `image.tag` are empty:
+  # caller-token Cloud API checks require the `-gke` provider build.
+  imageFlavor: gke
+  replicaCount: 2
+  minReadySeconds: 15
+  terminationGracePeriodSeconds: 45
+  listenPort: 8383
+  preStopSleepSeconds: 30
+  # ConfigMap values (referenced via envFrom and HTTPRoute hostnames).
+  domain: lookout.example.com
+  googleClientId: 123456789012-replace-me.apps.googleusercontent.com
+  googleAllow: "@example.com"
+  googleAllowWrite: ""
+  googleGroupsServiceAccount: ""
+  clustersFrom: ""
+  oauthCustody: ""
+  oauthVaultAuthProvider: ""
+  args:
+    - "--listen=0.0.0.0:8383"
+    - "--allow-non-loopback"
+    - "--access-log=/dev/stdout"
+    - "--google-client-id=$(GOOGLE_CLIENT_ID)"
+    - "--google-allow=$(GOOGLE_ALLOW)"
+    - "--google-allow-write=$(GOOGLE_ALLOW_WRITE)"
+    - "--google-groups-service-account=$(GOOGLE_GROUPS_SERVICE_ACCOUNT)"
+    - "--resource-url=https://$(DOMAIN)/mcp"
+    - "--clusters-from=$(CLUSTERS_FROM)"
+    - "--profile=triage"
+    - "--tools=audit,k8s_cluster_health,k8s_recent_changes,k8s_event_timeline,k8s_resource_spec,k8s_blast_radius,k8s_resource_top,-k8s_findings_diff"
+  extraArgs: []
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  service:
+    create: true
+    type: ClusterIP
+    port: 80
+    annotations: {}
+    labels: {}
+  # GKE Gateway + HTTPRoute + HealthCheckPolicy + GCPBackendPolicy
+  # (deploy/mcp/gateway.yaml). Disable to bring your own ingress/route.
+  gateway:
+    enabled: true
+    gatewayClassName: gke-l7-global-external-managed
+    certMap: lookout-mcp
+    namedAddress: lookout-mcp-ip
+    backendTimeoutSec: 300
+  # Generic MCP client OAuth server (deploy/mcp/oauth): mounts the
+  # `lookout-oauth-client` and `lookout-oauth-keys` Secrets and enables
+  # `--oauth-issuer`.
+  oauth:
+    enabled: false
+    clientSecretName: lookout-oauth-client
+    keysSecretName: lookout-oauth-keys

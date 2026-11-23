@@ -93,7 +93,7 @@ func TestListForbiddenReadsTheServerVerb(t *testing.T) {
 // deploy/12-clusterrole-watcher.yaml, so "as lookout's shipped
 // ClusterRole does" is never a false promise and never a missed one.
 func TestShippedRoleGrantsMatchManifest(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "12-clusterrole-watcher.yaml"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "base", "12-clusterrole-watcher.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}

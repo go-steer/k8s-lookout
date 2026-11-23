@@ -13,49 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Holds the Helm chart to the raw manifests.
+# Holds the Helm chart and compatibility aliases to deploy/base/,
+# deploy/components/*, and deploy/mcp/ (#852).
 #
 #   helm template lookout-watch deploy/chart -n agent-triage
-#     ==  kustomize build deploy/
-#
-# Why this exists rather than trust: two independent descriptions of
-# the same deployment will diverge — that is not a risk, it is a
-# certainty — and the failure mode is silent. deploy/12's ClusterRole
-# is already pinned to what the code reads by
-# pkg/checks/state/rbac_test.go; a chart not held to the same manifest
-# breaks that guarantee for chart users specifically, and nothing else
-# would notice. It would keep deploying last quarter's RBAC while every
-# test in the tree stayed green.
-#
-# The comparison is exact, after normalization:
-#   - resources sorted by (kind, namespace, name), keys sorted
-#   - Helm's own provenance labels dropped (helm.sh/chart,
-#     app.kubernetes.io/managed-by, app.kubernetes.io/version) — they
-#     are metadata Helm adds to every chart and the manifests correctly
-#     do not carry them
-#   - `helm template`'s "# Source:" comments dropped
-# Everything else — every RBAC rule, every container arg, every probe,
-# the security context, the strategy — must match byte for byte.
-#
-# Also checked: Chart.yaml appVersion against deploy/51's image pin, so
-# a release cut that bumps one and forgets the other fails here rather
-# than shipping a chart that installs the previous release.
-#
-# Requires helm and kustomize. Skips with a notice (exit 0) when either
-# is missing, so a contributor without them is not blocked. That skip
-# is exactly the wrong behaviour in CI — a green job that silently
-# checked nothing is worse than no job — so CI sets
-# HELM_PARITY_REQUIRE=1, which turns a missing tool into a failure.
+#     ==  kustomize build deploy/base/  ==  kustomize build deploy/
 #
 # Usage:
 #   dev/tools/verify-helm-parity            — diff, exit 1 on drift
-#   dev/tools/verify-helm-parity --show     — print both renders
+#   dev/tools/verify-helm-parity --show     — print default renders
 #   HELM_PARITY_REQUIRE=1 …                 — missing tool is an error
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
 cd "$(repo_root)"
 
 RELEASE_NAME="lookout-watch"
+MCP_RELEASE_NAME="lookout-mcp"
 NAMESPACE="agent-triage"
 CHART="deploy/chart"
 
@@ -73,49 +46,40 @@ for tool in helm kustomize python3; do
   fi
 done
 
-# ---- chart version vs appVersion vs the deploy/51 image pin -----------
+# ---- regular-file compatibility copies in deploy/ & deploy-mcp-gemini/ -
+for pair in \
+  "deploy/base/12-clusterrole-watcher.yaml:deploy/12-clusterrole-watcher.yaml" \
+  "deploy/base/14-role-watcher-capacity.yaml:deploy/14-role-watcher-capacity.yaml" \
+  "deploy/base/51-deployment-watcher.yaml:deploy/51-deployment-watcher.yaml" \
+  "deploy/mcp/mcp.yaml:deploy-mcp-gemini/mcp.yaml" \
+  "deploy/mcp/gateway.yaml:deploy-mcp-gemini/gateway.yaml"; do
+  src="${pair%%:*}"
+  dst="${pair#*:}"
+  if [[ -L "$dst" ]]; then
+    echo "✗ $dst is a symlink; keep a regular file so raw GitHub fetches and core.symlinks=false clones get valid YAML" >&2
+    exit 1
+  fi
+  if ! cmp -s "$src" "$dst"; then
+    echo "✗ $dst drifted from $src" >&2
+    exit 1
+  fi
+done
 
-# Read the rendered manifest, not the file: deploy/51's header comment
-# shows a `:<version>-gke` example line, and a grep over the raw source
-# happily matches the documentation instead of the deployment.
-pinned="$(kustomize build deploy/ | grep -oE '^ +image: ghcr\.io/go-steer/lookout:[^ ]+' | head -1 | cut -d: -f3)"
+# ---- chart version vs appVersion vs image pins -------------------------
+pinned="$(kustomize build deploy/base/ | grep -oE '^ +image: ghcr\.io/go-steer/lookout:[^ ]+' | head -1 | cut -d: -f3)"
 appversion="$(grep -E '^appVersion:' "$CHART/Chart.yaml" | head -1 | sed -E 's/^appVersion: *"?([^"]*)"?/\1/')"
 if [[ "$pinned" != "$appversion" ]]; then
-  echo "✗ Chart.yaml appVersion ($appversion) != deploy/51 image pin ($pinned)" >&2
+  echo "✗ Chart.yaml appVersion ($appversion) != deploy/base/51 image pin ($pinned)" >&2
   echo "  The release cut bumps both — see docs/release-process.md." >&2
   exit 1
 fi
 
-# deploy-mcp-gemini/ is a standalone overlay (it does not build on
-# deploy/), so it carries its own image pin: the -gke flavor of the
-# same version. The release cut bumps it with deploy/51, and this keeps
-# the two from drifting.
-mcppinned="$(kustomize build deploy-mcp-gemini/ | grep -oE '^ +image: ghcr\.io/go-steer/lookout:[^ ]+' | head -1 | cut -d: -f3)"
+mcppinned="$(kustomize build deploy/mcp/ | grep -oE '^ +image: ghcr\.io/go-steer/lookout:[^ ]+' | head -1 | cut -d: -f3)"
 if [[ "$mcppinned" != "$pinned-gke" ]]; then
-  echo "✗ deploy-mcp-gemini image pin ($mcppinned) != deploy/51 image pin + -gke ($pinned-gke)" >&2
+  echo "✗ deploy/mcp image pin ($mcppinned) != deploy/base/51 image pin + -gke ($pinned-gke)" >&2
   echo "  The release cut bumps both — see docs/release-process.md." >&2
   exit 1
 fi
-
-# deploy-mcp-gemini/ serves through a Gateway only. A stray Ingress-path
-# object or a NEG annotation of ours beside it is a second load balancer
-# (the Gateway controller owns the Service's NEG annotation), and the
-# route must carry DOMAIN from config.yaml. The deprecated
-# deploy-mcp-gemini-gateway/ alias must build exactly the same.
-gw="$(kustomize build deploy-mcp-gemini/)"
-if grep -qE '^kind: (Ingress|ManagedCertificate|BackendConfig)$|cloud\.google\.com/(neg|backend-config)' <<<"$gw"; then
-  echo "✗ deploy-mcp-gemini carries part of an Ingress path" >&2
-  exit 1
-fi
-if ! grep -qE '^kind: Gateway$' <<<"$gw" || ! grep -qE '^  - lookout\.example\.com$' <<<"$gw"; then
-  echo "✗ deploy-mcp-gemini has no Gateway, or its HTTPRoute hostname is not DOMAIN from config.yaml" >&2
-  exit 1
-fi
-if [[ "$(kustomize build deploy-mcp-gemini-gateway/)" != "$gw" ]]; then
-  echo "✗ the deploy-mcp-gemini-gateway alias no longer builds exactly deploy-mcp-gemini/" >&2
-  exit 1
-fi
-echo "✓ deploy-mcp-gemini serves through a Gateway on DOMAIN; its old -gateway alias matches"
 
 chartversion="$(grep -E '^version:' "$CHART/Chart.yaml" | head -1 | sed -E 's/^version: *"?([^"]*)"?/\1/')"
 if [[ "$chartversion" != "${appversion#v}" ]]; then
@@ -124,39 +88,61 @@ if [[ "$chartversion" != "${appversion#v}" ]]; then
   exit 1
 fi
 
-# ---- render both ------------------------------------------------------
+# ---- deploy/mcp/ Gateway checks & legacy MCP aliases -------------------
+gw="$(kustomize build deploy/mcp/)"
+if grep -qE '^kind: (Ingress|ManagedCertificate|BackendConfig)$|cloud\.google\.com/(neg|backend-config)' <<<"$gw"; then
+  echo "✗ deploy/mcp carries part of an Ingress path" >&2
+  exit 1
+fi
+if ! grep -qE '^kind: Gateway$' <<<"$gw" || ! grep -qE '^  - lookout\.example\.com$' <<<"$gw"; then
+  echo "✗ deploy/mcp has no Gateway, or its HTTPRoute hostname is not DOMAIN from config.yaml" >&2
+  exit 1
+fi
+for mcp_alias in deploy-mcp-gemini deploy-mcp-gemini-gateway; do
+  if [[ "$(kustomize build "$mcp_alias/")" != "$gw" ]]; then
+    echo "✗ the $mcp_alias alias no longer builds exactly deploy/mcp/" >&2
+    exit 1
+  fi
+done
+echo "✓ deploy/mcp serves through a Gateway on DOMAIN; legacy MCP aliases match"
+
+# ---- helpers -----------------------------------------------------------
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" >"$tmp/chart.raw.yaml"
-kustomize build deploy/ >"$tmp/kustomize.raw.yaml"
-
 normalize() {
   python3 - "$1" "$2" <<'PY'
-import sys, yaml
+import re, sys, yaml
 
 src, dst = sys.argv[1], sys.argv[2]
 
-# Labels Helm stamps on everything it renders. They are provenance, not
-# configuration, and the hand-written manifests correctly do not carry
-# them — so they are the one difference this check forgives.
 HELM_META = {
     "helm.sh/chart",
     "app.kubernetes.io/managed-by",
     "app.kubernetes.io/version",
 }
+AX_HASH_RE = re.compile(r"^lookout-ax-task-[0-9a-z]{10}$")
 
 docs = []
 for doc in yaml.safe_load_all(open(src)):
     if not doc:
         continue
-    labels = doc.get("metadata", {}).get("labels")
+    meta = doc.get("metadata", {})
+    labels = meta.get("labels")
     if labels:
         for key in HELM_META:
             labels.pop(key, None)
         if not labels:
-            del doc["metadata"]["labels"]
+            del meta["labels"]
+    if doc.get("kind") == "ConfigMap" and AX_HASH_RE.match(meta.get("name", "")):
+        meta["name"] = "lookout-ax-task"
+    if doc.get("kind") == "Deployment":
+        vols = doc.get("spec", {}).get("template", {}).get("spec", {}).get("volumes", [])
+        for v in vols:
+            cm = v.get("configMap")
+            if cm and AX_HASH_RE.match(cm.get("name", "")):
+                cm["name"] = "lookout-ax-task"
     docs.append(doc)
 
 def key(d):
@@ -169,102 +155,186 @@ with open(dst, "w") as out:
 PY
 }
 
-normalize "$tmp/chart.raw.yaml" "$tmp/chart.yaml"
-normalize "$tmp/kustomize.raw.yaml" "$tmp/kustomize.yaml"
+build_composed() {
+  local name="$1"; shift
+  local dir="$tmp/composed-$name"
+  mkdir -p "$dir"
+  local base_rel
+  base_rel="$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$(pwd)/$1" "$dir")"
+  shift
+  {
+    echo "apiVersion: kustomize.config.k8s.io/v1beta1"
+    echo "kind: Kustomization"
+    echo "resources:"
+    echo "  - $base_rel"
+    if [[ $# -gt 0 ]]; then
+      echo "components:"
+      for comp in "$@"; do
+        local comp_rel
+        comp_rel="$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$(pwd)/$comp" "$dir")"
+        echo "  - $comp_rel"
+      done
+    fi
+  } >"$dir/kustomization.yaml"
+  kustomize build "$dir"
+}
+
+assert_parity() {
+  local label="$1"
+  local kust_raw="$2"
+  local helm_raw="$3"
+  local slug="${label//[^A-Za-z0-9_-]/_}"
+  normalize "$kust_raw" "$tmp/$slug.kust.yaml"
+  normalize "$helm_raw" "$tmp/$slug.helm.yaml"
+  if diff -u "$tmp/$slug.kust.yaml" "$tmp/$slug.helm.yaml" >"$tmp/$slug.diff"; then
+    local count
+    count="$(grep -c '^kind:' "$tmp/$slug.kust.yaml" || true)"
+    echo "✓ $label ($count resources)"
+  else
+    echo "✗ parity drift on $label (left = kustomize, right = helm):" >&2
+    cat "$tmp/$slug.diff" >&2
+    exit 1
+  fi
+}
+
+# ---- base & legacy deploy/ alias --------------------------------------
+kustomize build deploy/base/ >"$tmp/base.raw.yaml"
+if [[ "$(kustomize build deploy/)" != "$(cat "$tmp/base.raw.yaml")" ]]; then
+  echo "✗ deploy/ alias no longer builds exactly deploy/base/" >&2
+  exit 1
+fi
+helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" >"$tmp/chart-base.raw.yaml"
 
 if [[ "$SHOW" -eq 1 ]]; then
-  echo "--- kustomize build deploy/ ---"
-  cat "$tmp/kustomize.yaml"
+  normalize "$tmp/base.raw.yaml" "$tmp/show-kust.yaml"
+  normalize "$tmp/chart-base.raw.yaml" "$tmp/show-helm.yaml"
+  echo "--- kustomize build deploy/base/ ---"
+  cat "$tmp/show-kust.yaml"
   echo "--- helm template $RELEASE_NAME $CHART -n $NAMESPACE ---"
-  cat "$tmp/chart.yaml"
+  cat "$tmp/show-helm.yaml"
 fi
+assert_parity "chart default matches deploy/base/ and deploy/" "$tmp/base.raw.yaml" "$tmp/chart-base.raw.yaml"
 
-if diff -u "$tmp/kustomize.yaml" "$tmp/chart.yaml" >"$tmp/diff"; then
-  count="$(grep -c '^kind:' "$tmp/kustomize.yaml" || true)"
-  echo "✓ chart matches deploy/ manifests ($count resources)"
-else
-  echo "✗ the Helm chart and deploy/*.yaml have diverged." >&2
-  echo "  Left is kustomize build deploy/ (the source of truth)," >&2
-  echo "  right is helm template. Fix deploy/chart/templates/." >&2
-  echo >&2
-  cat "$tmp/diff" >&2
+# ---- single-component variants & legacy root aliases -------------------
+check_single_component() {
+  local name="$1"
+  local comp="$2"
+  local alias_dir="$3"
+  shift 3
+  build_composed "$name" "deploy/base" "$comp" >"$tmp/$name.comp.yaml"
+  kustomize build "$alias_dir/" >"$tmp/$name.alias.yaml"
+  if [[ "$(cat "$tmp/$name.comp.yaml")" != "$(cat "$tmp/$name.alias.yaml")" ]]; then
+    echo "✗ legacy alias $alias_dir/ diverged from deploy/base + $comp" >&2
+    exit 1
+  fi
+  helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" "$@" >"$tmp/$name.helm.yaml"
+  assert_parity "chart ($*) matches $comp and $alias_dir/" "$tmp/$name.comp.yaml" "$tmp/$name.helm.yaml"
+}
+
+check_single_component "sink-ax" "deploy/components/sink-ax" "deploy-ax" --set sink.type=ax
+# Both Kustomize and Helm must stamp a 10-char content-hash suffix onto lookout-ax-task
+# so editing task.yaml triggers a rollout without manual pod restarts.
+for ax_render in "$tmp/sink-ax.comp.yaml" "$tmp/sink-ax.helm.yaml"; do
+  if ! grep -qE 'name: lookout-ax-task-[0-9a-z]{10}$' "$ax_render"; then
+    echo "✗ $ax_render did not stamp a content-hash suffix on lookout-ax-task" >&2
+    exit 1
+  fi
+done
+
+check_single_component "no-secrets" "deploy/components/no-secrets" "deploy-no-secrets" --set rbac.secrets=false
+check_single_component "scope-namespaced" "deploy/components/scope-namespaced" "deploy-namespaced" --set rbac.scope=namespace
+check_single_component "scope-namespaced-strict" "deploy/components/scope-namespaced-strict" "deploy-namespaced-strict" --set rbac.scope=namespace --set rbac.nodes=false
+check_single_component "probe-from" "deploy/components/probe-from" "deploy-probe" --set rbac.probeFrom=true
+
+# ---- multi-component compositions vs Helm ------------------------------
+build_composed "ax-nosecrets" "deploy/base" "deploy/components/sink-ax" "deploy/components/no-secrets" >"$tmp/ax-nosecrets.kust.yaml"
+helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set sink.type=ax --set rbac.secrets=false >"$tmp/ax-nosecrets.helm.yaml"
+assert_parity "composed sink-ax + no-secrets matches Helm" "$tmp/ax-nosecrets.kust.yaml" "$tmp/ax-nosecrets.helm.yaml"
+
+build_composed "ns-nosecrets" "deploy/base" "deploy/components/scope-namespaced" "deploy/components/no-secrets" >"$tmp/ns-nosecrets.kust.yaml"
+helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.scope=namespace --set rbac.secrets=false >"$tmp/ns-nosecrets.helm.yaml"
+assert_parity "composed scope-namespaced + no-secrets matches Helm" "$tmp/ns-nosecrets.kust.yaml" "$tmp/ns-nosecrets.helm.yaml"
+
+build_composed "strict-nosecrets" "deploy/base" "deploy/components/scope-namespaced-strict" "deploy/components/no-secrets" >"$tmp/strict-nosecrets.kust.yaml"
+helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.scope=namespace --set rbac.nodes=false --set rbac.secrets=false >"$tmp/strict-nosecrets.helm.yaml"
+assert_parity "composed scope-namespaced-strict + no-secrets matches Helm" "$tmp/strict-nosecrets.kust.yaml" "$tmp/strict-nosecrets.helm.yaml"
+
+# Reversed ordering (`no-secrets` BEFORE `scope-namespaced` or `scope-namespaced-strict`)
+# must fail closed rather than silently leaving `secrets: list` on Role/lookout-watch.
+for scope_comp in deploy/components/scope-namespaced deploy/components/scope-namespaced-strict; do
+  if build_composed "bad-order" "deploy/base" "deploy/components/no-secrets" "$scope_comp" >/dev/null 2>&1; then
+    echo "✗ kustomize build accepted no-secrets BEFORE $scope_comp (would leak secrets: list on Role/lookout-watch)" >&2
+    exit 1
+  fi
+done
+echo "✓ reversed no-secrets + scope-* component order fails closed"
+
+# Overriding ConfigMap/lookout-ax-task via outer `patches:` (as documented in
+# deploy/components/sink-ax/README.md) must succeed and re-hash lookout-ax-task.
+mkdir -p "$tmp/ax-override"
+base_for_ax="$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$(pwd)/deploy/base" "$tmp/ax-override")"
+sink_for_ax="$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$(pwd)/deploy/components/sink-ax" "$tmp/ax-override")"
+cat >"$tmp/ax-override/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - $base_for_ax
+components:
+  - $sink_for_ax
+patches:
+  - target:
+      kind: ConfigMap
+      name: lookout-ax-task
+    patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: lookout-ax-task
+      data:
+        task.yaml: |
+          apiVersion: ax.io/v1alpha1
+          kind: Task
+          spec:
+            image: ghcr.io/example/custom-agent@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+EOF
+kustomize build "$tmp/ax-override" >"$tmp/ax-override.yaml"
+orig_ax_cm="$(grep -oE 'name: lookout-ax-task-[0-9a-z]{10}$' "$tmp/sink-ax.comp.yaml" | head -1)"
+new_ax_cm="$(grep -oE 'name: lookout-ax-task-[0-9a-z]{10}$' "$tmp/ax-override.yaml" | head -1)"
+if [[ -z "$new_ax_cm" || "$new_ax_cm" == "$orig_ax_cm" ]] || [[ "$(grep -cF "$new_ax_cm" "$tmp/ax-override.yaml")" != 2 ]]; then
+  echo "✗ outer patches: override on ConfigMap/lookout-ax-task did not re-hash both ConfigMap and Deployment volume" >&2
   exit 1
 fi
+echo "✓ outer patches: override on ConfigMap/lookout-ax-task re-hashes cleanly"
 
-# ---- the no-secrets variant: rbac.secrets=false == deploy-no-secrets/ --
-#
-# The one non-default path with a manifest of its own (#149), so it gets
-# the same exact diff rather than a render_ok: the overlay and the value
-# must drop the same rules and add the same flag.
+build_composed "ax-probe" "deploy/base" "deploy/components/sink-ax" "deploy/components/probe-from" >"$tmp/ax-probe.kust.yaml"
+helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set sink.type=ax --set rbac.probeFrom=true >"$tmp/ax-probe.helm.yaml"
+assert_parity "composed sink-ax + probe-from matches Helm" "$tmp/ax-probe.kust.yaml" "$tmp/ax-probe.helm.yaml"
 
-helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.secrets=false >"$tmp/chart-ns.raw.yaml"
-kustomize build deploy-no-secrets/ >"$tmp/kustomize-ns.raw.yaml"
-normalize "$tmp/chart-ns.raw.yaml" "$tmp/chart-ns.yaml"
-normalize "$tmp/kustomize-ns.raw.yaml" "$tmp/kustomize-ns.yaml"
+# ---- MCP mode (deploy/mcp/ and deploy/mcp/oauth) -----------------------
+kustomize build deploy/mcp/ >"$tmp/mcp.kust.yaml"
+helm template "$MCP_RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set mode=mcp >"$tmp/mcp.helm.yaml"
+assert_parity "chart (mode=mcp) matches deploy/mcp/" "$tmp/mcp.kust.yaml" "$tmp/mcp.helm.yaml"
 
-if diff -u "$tmp/kustomize-ns.yaml" "$tmp/chart-ns.yaml" >"$tmp/diff-ns"; then
-  echo "✓ chart with rbac.secrets=false matches deploy-no-secrets/"
-else
-  echo "✗ helm template --set rbac.secrets=false and deploy-no-secrets/ have diverged." >&2
-  echo "  Left is kustomize build deploy-no-secrets/, right is helm template." >&2
-  echo >&2
-  cat "$tmp/diff-ns" >&2
+build_composed "mcp-oauth" "deploy/mcp" "deploy/mcp/oauth" >"$tmp/mcp-oauth.kust.yaml"
+build_composed "mcp-oauth-legacy" "deploy-mcp-gemini" "deploy-mcp-gemini/oauth" >"$tmp/mcp-oauth-legacy.kust.yaml"
+if [[ "$(cat "$tmp/mcp-oauth.kust.yaml")" != "$(cat "$tmp/mcp-oauth-legacy.kust.yaml")" ]]; then
+  echo "✗ deploy-mcp-gemini + deploy-mcp-gemini/oauth diverged from deploy/mcp + deploy/mcp/oauth" >&2
   exit 1
 fi
+helm template "$MCP_RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set mode=mcp --set mcp.oauth.enabled=true >"$tmp/mcp-oauth.helm.yaml"
+assert_parity "chart (mode=mcp mcp.oauth.enabled=true) matches deploy/mcp + oauth" "$tmp/mcp-oauth.kust.yaml" "$tmp/mcp-oauth.helm.yaml"
 
-# The namespace-scoped tier (#407): rbac.scope=namespace must render
-# exactly deploy-namespaced/.
-helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.scope=namespace >"$tmp/chart-scope.raw.yaml"
-kustomize build deploy-namespaced/ >"$tmp/kustomize-scope.raw.yaml"
-normalize "$tmp/chart-scope.raw.yaml" "$tmp/chart-scope.yaml"
-normalize "$tmp/kustomize-scope.raw.yaml" "$tmp/kustomize-scope.yaml"
-
-if diff -u "$tmp/kustomize-scope.yaml" "$tmp/chart-scope.yaml" >"$tmp/diff-scope"; then
-  echo "✓ chart with rbac.scope=namespace matches deploy-namespaced/"
-else
-  echo "✗ helm template --set rbac.scope=namespace and deploy-namespaced/ have diverged." >&2
-  echo "  Left is kustomize build deploy-namespaced/, right is helm template." >&2
-  echo >&2
-  cat "$tmp/diff-scope" >&2
-  exit 1
-fi
-
-# ---- the probe variant: rbac.probeFrom=true == deploy-probe/ -----------
-#
-# The one write grant (#539) and the admission policy that narrows it.
-# Exact diff for the same reason as the no-secrets variant: the policy's
-# CEL is security-relevant, and two copies of it must not drift.
-
-helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.probeFrom=true >"$tmp/chart-probe.raw.yaml"
-kustomize build deploy-probe/ >"$tmp/kustomize-probe.raw.yaml"
-normalize "$tmp/chart-probe.raw.yaml" "$tmp/chart-probe.yaml"
-normalize "$tmp/kustomize-probe.raw.yaml" "$tmp/kustomize-probe.yaml"
-
-if diff -u "$tmp/kustomize-probe.yaml" "$tmp/chart-probe.yaml" >"$tmp/diff-probe"; then
-  echo "✓ chart with rbac.probeFrom=true matches deploy-probe/"
-else
-  echo "✗ helm template --set rbac.probeFrom=true and deploy-probe/ have diverged." >&2
-  echo "  Left is kustomize build deploy-probe/, right is helm template." >&2
-  echo >&2
-  cat "$tmp/diff-probe" >&2
-  exit 1
-fi
-
-# Re-namespacing deploy-probe/ must not unhook its admission policy from
-# the identity the grant goes to. Kustomize rewrites the binding's
-# subject namespace but cannot rewrite a string inside CEL, so the
-# policy's identity match must not depend on the namespace. Wrap the
-# overlay in a kustomization with another namespace and check that the
-# rewritten subject still satisfies the policy's identity condition.
+# ---- re-namespaced probe-from CEL identity check -----------------------
 mkdir -p "$tmp/renamespaced"
-# kustomize refuses absolute resource paths, so point at the overlay
-# relative to the wrapper.
-probe_rel="$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$(pwd)/deploy-probe" "$tmp/renamespaced")"
+base_rel="$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$(pwd)/deploy/base" "$tmp/renamespaced")"
+probe_rel="$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$(pwd)/deploy/components/probe-from" "$tmp/renamespaced")"
 cat >"$tmp/renamespaced/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: team-x-lookout
 resources:
+  - $base_rel
+components:
   - $probe_rel
 EOF
 kustomize build "$tmp/renamespaced" >"$tmp/renamespaced.yaml"
@@ -277,14 +347,13 @@ vap = next(d for d in docs if d["kind"] == "ValidatingAdmissionPolicy")
 cond = next(c["expression"] for c in vap["spec"]["matchConditions"] if c["name"] == "lookout-identity")
 
 def matches(expr, user):
-    # The two identity forms net probe-from's runtime guard recognizes.
     m = re.fullmatch(r"request\.userInfo\.username\.startsWith\('system:serviceaccount:'\) && request\.userInfo\.username\.endsWith\(':([^']+)'\)", expr)
     if m:
         return user.startswith("system:serviceaccount:") and user.endswith(":" + m.group(1))
     m = re.fullmatch(r"request\.userInfo\.username == '([^']+)'", expr)
     if m:
         return user == m.group(1)
-    sys.exit("✗ deploy-probe/'s identity condition is in a form net probe-from cannot verify: " + expr)
+    sys.exit("✗ probe-from identity condition is in a form net probe-from cannot verify: " + expr)
 
 for s in crb["subjects"]:
     if s["kind"] != "ServiceAccount":
@@ -293,34 +362,32 @@ for s in crb["subjects"]:
     if s["namespace"] != "team-x-lookout":
         sys.exit("✗ re-namespacing did not rewrite the binding subject: " + user)
     if not matches(cond, user):
-        sys.exit("✗ re-namespaced deploy-probe/ leaves %s UNGUARDED: the policy's identity condition (%s) no longer matches it" % (user, cond))
-print("✓ re-namespaced deploy-probe/ keeps its admission policy on the granted ServiceAccount")
+        sys.exit("✗ re-namespaced probe-from leaves %s UNGUARDED: %s" % (user, cond))
+print("✓ re-namespaced probe-from keeps its admission policy on the granted ServiceAccount")
 PY
 
-# rbac.scope=namespace's strictly namespaced variant (#407): no ClusterRole at all.
-helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.scope=namespace --set rbac.nodes=false >"$tmp/chart-strict.raw.yaml"
-kustomize build deploy-namespaced-strict/ >"$tmp/kustomize-strict.raw.yaml"
-normalize "$tmp/chart-strict.raw.yaml" "$tmp/chart-strict.yaml"
-normalize "$tmp/kustomize-strict.raw.yaml" "$tmp/kustomize-strict.yaml"
-
-if diff -u "$tmp/kustomize-strict.yaml" "$tmp/chart-strict.yaml" >"$tmp/diff-strict"; then
-  echo "✓ chart with rbac.scope=namespace rbac.nodes=false matches deploy-namespaced-strict/"
-else
-  echo "✗ helm template --set rbac.scope=namespace --set rbac.nodes=false and deploy-namespaced-strict/ have diverged." >&2
-  echo "  Left is kustomize build deploy-namespaced-strict/, right is helm template." >&2
-  echo >&2
-  cat "$tmp/diff-strict" >&2
-  exit 1
-fi
-
-# ---- the chart must also be valid on its own --------------------------
-
+# ---- webhook sink & non-default chart paths ----------------------------
 helm lint "$CHART" --namespace "$NAMESPACE" --quiet
 
-# Non-default paths the parity diff cannot reach, because the defaults
-# reproduce the manifests and these deliberately do not. Rendering them
-# is not a correctness proof; it catches the template that only fails
-# when someone turns an option on, which is the worst time to find out.
+wh="$(helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" \
+  --set sink.type=webhook --set sink.webhook.url=https://hooks.example:8443)"
+if ! grep -q -- '--sink=webhook' <<<"$wh" || ! grep -q -- '--sink-url=https://hooks.example:8443' <<<"$wh"; then
+  echo "✗ sink.type=webhook did not render --sink=webhook and --sink-url" >&2
+  exit 1
+fi
+if grep -qE -- '--(daemon-url|owner|token-env|mode)=' <<<"$wh" || grep -q 'WATCHER_TOKEN' <<<"$wh"; then
+  echo "✗ sink.type=webhook leaked core-agent session flags or WATCHER_TOKEN env" >&2
+  exit 1
+fi
+wh_tok="$(helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" \
+  --set sink.type=webhook --set sink.webhook.url=https://hooks.example:8443 \
+  --set sink.webhook.tokenSecretName=my-hook-token)"
+if ! grep -q -- '--sink-token-env=SINK_TOKEN' <<<"$wh_tok" || ! grep -q 'name: my-hook-token' <<<"$wh_tok"; then
+  echo "✗ sink.webhook.tokenSecretName did not render --sink-token-env and secretKeyRef" >&2
+  exit 1
+fi
+echo "✓ chart sink.type=webhook renders clean flags and optional bearer Secret"
+
 render_ok() {
   local label="$1"; shift
   if ! helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" "$@" >/dev/null; then
@@ -329,40 +396,68 @@ render_ok() {
   fi
 }
 
-render_ok "serviceMonitor.enabled"  --set serviceMonitor.enabled=true
-render_ok "persistence.enabled"     --set persistence.enabled=true
-render_ok "persistence.existingClaim" --set persistence.enabled=true --set persistence.existingClaim=mine
-render_ok "rbac disabled"           --set rbac.create=false --set rbac.capacity=false
-render_ok "serviceAccount external" --set serviceAccount.create=false --set serviceAccount.name=other
-render_ok "service disabled"        --set service.create=false --set networkPolicy.create=false
-render_ok "gke flavor"              --set image.flavor=gke
-render_ok "namespace scope, no secrets" --set rbac.scope=namespace --set rbac.secrets=false
-# A namespace list renders one Role + RoleBinding per namespace and names
-# every one of them in --namespace.
+render_ok "serviceMonitor.enabled"       --set serviceMonitor.enabled=true
+render_ok "persistence.enabled"          --set persistence.enabled=true
+render_ok "persistence.existingClaim"    --set persistence.enabled=true --set persistence.existingClaim=mine
+render_ok "rbac disabled"                --set rbac.create=false --set rbac.capacity=false
+render_ok "serviceAccount external"      --set serviceAccount.create=false --set serviceAccount.name=other
+render_ok "service disabled"             --set service.create=false --set networkPolicy.create=false
+render_ok "gke flavor"                   --set image.flavor=gke
+render_ok "ax with v0.5 http router"     --set sink.type=ax --set sink.ax.routerMTLS=false \
+  --set-json 'extraArgs=["--ax-router-url=http://atenet-router.ate-system.svc.cluster.local"]'
+render_ok "mcp without gateway"          --set mode=mcp --set mcp.gateway.enabled=false
+
+# Replacing `args` wholesale (omitting `--daemon-url=`) under sink.type=ax or
+# sink.type=webhook must still emit `--sink=ax` / `--sink=webhook` and honor
+# flags supplied in `extraArgs`.
+wh_custom="$(helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" \
+  --set sink.type=webhook --set sink.webhook.url=https://hooks.example:8443 \
+  --set-json 'args=["--cluster-name=prod","--in-cluster"]')"
+if ! grep -q -- '--sink=webhook' <<<"$wh_custom" || ! grep -q -- '--sink-url=https://hooks.example:8443' <<<"$wh_custom"; then
+  echo "✗ wholesale args replacement under sink.type=webhook dropped --sink=webhook" >&2
+  exit 1
+fi
+ax_custom="$(helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" \
+  --set sink.type=ax --set fullnameOverride=sentinel-eu \
+  --set-json 'args=["--token-env=WATCHER_TOKEN","--cluster-name=eu","--in-cluster"]')"
+if ! grep -q -- '--sink=ax' <<<"$ax_custom" || ! grep -qE 'name: sentinel-eu-ax-task-[0-9a-z]{10}$' <<<"$ax_custom"; then
+  echo "✗ wholesale args / fullnameOverride under sink.type=ax dropped --sink=ax or failed to scope ax-task ConfigMap name" >&2
+  exit 1
+fi
+
 listed="$(helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.scope=namespace \
   --set-json 'rbac.namespaces=["team-a","team-b"]')"
 if [[ "$(grep -c '^  namespace: team-' <<<"$listed")" != 4 ]] || ! grep -q -- '--namespace=team-a,team-b' <<<"$listed"; then
   echo "✗ rbac.namespaces=[team-a,team-b] did not render a Role per namespace and --namespace=team-a,team-b" >&2
   exit 1
 fi
-# A typo'd scope must fail the render, not fall back to either tier.
-if helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.scope=namespaced >/dev/null 2>&1; then
-  echo "✗ chart rendered with rbac.scope=namespaced — the guard in _helpers.tpl is not firing" >&2
-  exit 1
-fi
-# A user who already chose an --enrich-lists keeps it; the chart must
-# not append a second one.
+
+assert_refused() {
+  local label="$1"; shift
+  if helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" "$@" >/dev/null 2>&1; then
+    echo "✗ chart unexpectedly rendered invalid configuration: $label" >&2
+    exit 1
+  fi
+}
+
+assert_refused "rbac.scope=namespaced" --set rbac.scope=namespaced
+assert_refused "sink.type=bogus"       --set sink.type=bogus
+assert_refused "sink.type=webhook without url" --set sink.type=webhook
+assert_refused "sink.ax.routerMTLS=false without http router" --set sink.type=ax --set sink.ax.routerMTLS=false
+assert_refused "mode=bogus"            --set mode=bogus
+assert_refused "mcp gateway without service" --set mode=mcp --set mcp.service.create=false
+assert_refused "mcp with sink.type=ax" --set mode=mcp --set sink.type=ax
+assert_refused "mcp with rbac.probeFrom=true" --set mode=mcp --set rbac.probeFrom=true
+assert_refused "mcp with rbac.scope=namespace" --set mode=mcp --set rbac.scope=namespace
+assert_refused "mcp with rbac.secrets=false" --set mode=mcp --set rbac.secrets=false
+assert_refused "mcp with serviceMonitor.enabled=true" --set mode=mcp --set serviceMonitor.enabled=true
+assert_refused "mcp with persistence.enabled=true" --set mode=mcp --set persistence.enabled=true
+assert_refused "serviceMonitor without service" --set serviceMonitor.enabled=true --set service.create=false
+
 if helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" --set rbac.secrets=false \
-    --set-json 'args=["--enrich-lists=pods"]' | grep -q -- '--enrich-lists=all'; then
-  echo "✗ rbac.secrets=false appended --enrich-lists over one already in args" >&2
-  exit 1
-fi
-# serviceMonitor without a Service is a scrape target that silently
-# selects nothing; the chart refuses it, and this asserts the refusal.
-if helm template "$RELEASE_NAME" "$CHART" --namespace "$NAMESPACE" \
-    --set serviceMonitor.enabled=true --set service.create=false >/dev/null 2>&1; then
-  echo "✗ chart rendered a ServiceMonitor with service.create=false — the guard in templates/servicemonitor.yaml is not firing" >&2
+    --set-json 'extraArgs=["--enrich-lists=pods"]' | grep -q -- '--enrich-lists=all'; then
+  echo "✗ rbac.secrets=false appended --enrich-lists over one already in extraArgs" >&2
   exit 1
 fi
 
-echo "✓ chart lints and renders on every non-default path"
+echo "✓ chart lints and renders on every non-default path (with expected refusals)"

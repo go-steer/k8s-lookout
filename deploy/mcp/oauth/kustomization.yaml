@@ -1,0 +1,50 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Optional Component on deploy/mcp/: generic MCP clients (Claude Code,
+# gemini-cli) sign in through lookout's own OAuth authorization server
+# (`--oauth-issuer`) while Gemini Enterprise keeps working on the same
+# endpoint. Helm: `mode=mcp` with `mcp.oauth.enabled=true`.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      kind: Deployment
+      name: lookout-mcp
+    path: patch-deployment.yaml
+  - target:
+      kind: Deployment
+      name: lookout-mcp
+    patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/name
+        value: mcp
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--oauth-issuer=https://$(DOMAIN)"
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--google-client-secret-file=/etc/lookout/oauth/client/client.json"
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--oauth-keys-file=/etc/lookout/oauth/keys/keyring"
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--oauth-custody=$(OAUTH_CUSTODY)"
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--oauth-vault-auth-provider=$(OAUTH_VAULT_AUTH_PROVIDER)"
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--oauth-open-registration"

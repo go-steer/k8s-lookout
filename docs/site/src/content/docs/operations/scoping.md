@@ -119,8 +119,8 @@ cannot grant. So there are two supported tiers:
 
 | Tier | Grants | What runs |
 | --- | --- | --- |
-| **Default** (`deploy-namespaced/`, chart `rbac.scope=namespace`) | a Role per namespace, plus a ClusterRole that can only read nodes and PersistentVolumes | every auto-enabled source except `expiry` |
-| **Strict** (`deploy-namespaced-strict/`, plus chart `rbac.nodes=false`) | Roles only | `k8s-events`, `rollout`, `workload`, `autoscaling`, `degradation`, `ingress`, and `gateway` if its CRDs are installed |
+| **Default** (`deploy/components/scope-namespaced/`, legacy alias `deploy-namespaced/`, chart `rbac.scope=namespace`) | a Role per namespace, plus a ClusterRole that can only read nodes and PersistentVolumes | every auto-enabled source except `expiry` |
+| **Strict** (`deploy/components/scope-namespaced-strict/`, legacy alias `deploy-namespaced-strict/`, plus chart `rbac.nodes=false`) | Roles only | `k8s-events`, `rollout`, `workload`, `autoscaling`, `degradation`, `ingress`, and `gateway` if its CRDs are installed |
 
 The strict tier also loses `object-state`, `saturation`, `capacity`, and
 storm correlation. Under the default
@@ -128,10 +128,12 @@ storm correlation. Under the default
 line naming the missing permission, and `--storm=auto` resolves to off
 the same way. Naming a skipped source in `--sources`, or setting
 `--storm=on`, makes startup fail instead. The
-[deploy-namespaced README](https://github.com/go-steer/k8s-lookout/tree/main/deploy-namespaced)
+[`scope-namespaced` README](https://github.com/go-steer/k8s-lookout/tree/main/deploy/components/scope-namespaced)
 has the source-by-source table.
 
-Both overlays first ship in v0.33.0. Use one instead of `deploy/`:
+Both ship as composable Kustomize `Component`s on `deploy/base/` (the
+top-level `deploy-namespaced/` and `deploy-namespaced-strict/`
+directories remain as compatibility aliases):
 
 ```sh
 kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-namespaced?ref=v0.44.0"
@@ -158,9 +160,9 @@ The shipped ClusterRole's broadest rule is `list` on `secrets`
 cluster-wide. A Secret list returns *values*, so whoever compromises
 the sentinel pod can read every Secret in the cluster, however
 carefully the sentinel itself masks them. If your security review
-will not accept that grant, deploy the shipped variant that does not
-hold it, `deploy-no-secrets/`, *instead of* `deploy/` (first shipped
-in v0.29.0):
+will not accept that grant, compose `deploy/components/no-secrets/` on
+top of `deploy/base/` (the top-level `deploy-no-secrets/` directory
+remains as a compatibility alias, first shipped in v0.29.0):
 
 ```sh
 kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-no-secrets?ref=v0.44.0"
@@ -336,7 +338,7 @@ command. It fails if a command exits 1 where it should degrade, exits
 it to the same rule: under `view` it changes nothing and answers with
 one `probe.refused` record in the shared wording, exit 0 (see below).
 
-## The opt-in probe grant (`deploy-probe/`)
+## The opt-in probe grant (`deploy/components/probe-from/`)
 
 Every deployment above is read-only. One command, `lookout net
 probe-from --pod=<namespace>/<name>`, needs a write: it runs `net probe`
@@ -345,8 +347,8 @@ can see faults only that pod sees (a one-way partition from it, a DNS
 failure only it gets). The container stays in the pod's spec until the
 pod is replaced; the command refuses once a pod holds ten of them.
 
-`deploy-probe/` is `deploy/` plus that grant. Use it instead of
-`deploy/`:
+`deploy/components/probe-from/` (legacy alias `deploy-probe/`) adds that
+grant to `deploy/base/`:
 
 ```sh
 kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-probe?ref=vX.Y.Z"
