@@ -58,28 +58,29 @@ import (
 // to the components. All fields match --flag-name in the design
 // doc's "Sidecar CLI" section.
 type flags struct {
-	daemonURL         string
-	tokenEnv          string
-	mode              string
-	targetSession     string
-	owner             string
-	sink              string
-	sinkURL           string
-	sinkTokenEnv      string
-	axServer          string
-	axTaskTemplate    string
-	axRouterURL       string
-	axTaskScope       string
-	axServerTLS       bool
-	axCAFile          string
-	axTokenEnv        string
-	axRouterBundle    string
-	axRouterTrust     string
-	axRouterName      string
-	reasons           string
-	namespaces        string
-	excludeNamespaces string
-	watchScope        string
+	daemonURL                string
+	tokenEnv                 string
+	mode                     string
+	targetSession            string
+	owner                    string
+	sink                     string
+	sinkURL                  string
+	sinkTokenEnv             string
+	axServer                 string
+	axTaskTemplate           string
+	axWatchboardTaskTemplate string
+	axRouterURL              string
+	axTaskScope              string
+	axServerTLS              bool
+	axCAFile                 string
+	axTokenEnv               string
+	axRouterBundle           string
+	axRouterTrust            string
+	axRouterName             string
+	reasons                  string
+	namespaces               string
+	excludeNamespaces        string
+	watchScope               string
 	// admittedNamespaces is the run-scoped subset of the --watch-scope
 	// namespaces whose grants passed admitNamespaces; nil until a run sets
 	// it. See scopeNamespaces.
@@ -240,7 +241,8 @@ func newFlagSet() (*flag.FlagSet, *flags) {
 	fs.BoolVar(&f.axServerTLS, "ax-server-tls", false, "Dial --ax-server over TLS, verifying its certificate against the system roots (or --ax-ca-file) and the host name in --ax-server. Off by default: AX itself serves plaintext gRPC, so TLS needs a front that terminates it (a load balancer, gateway or mesh), which is the shape for an AX in another cluster. Only valid with --sink=ax.")
 	fs.StringVar(&f.axCAFile, "ax-ca-file", "", "PEM file of CA certificates added to the system roots when verifying the --ax-server TLS certificate (for a front with a private CA). Requires --ax-server-tls. Applies to the AX API only: the router is verified against --ax-router-trust-bundle.")
 	fs.StringVar(&f.axTokenEnv, "ax-token-env", "", "Env var name holding a bearer token (e.g. a Google ID token or service JWT) sent as per-RPC authorization metadata on every AX gRPC call. Optional (unset = unauthenticated gRPC); requires --ax-server-tls and --sink=ax.")
-	fs.StringVar(&f.axTaskTemplate, "ax-task-template", "", "Path to the AX Task manifest every task runs as (image, command, egress, http.port); the ax sink sets metadata.name per task (see --ax-task-scope). Required with --sink=ax.")
+	fs.StringVar(&f.axTaskTemplate, "ax-task-template", "", "Path to the AX Task manifest every incident and storm task runs as (image, command, egress, http.port), and the watchboard task when --ax-watchboard-task-template is unset; the ax sink sets metadata.name per task (see --ax-task-scope). Required with --sink=ax.")
+	fs.StringVar(&f.axWatchboardTaskTemplate, "ax-watchboard-task-template", "", "Path to the AX Task manifest the cluster's watchboard task (lookout-wb-<cluster>-<hash8>) runs as; defaults to --ax-task-template when unset so existing deployments behave identically. Lets the long-lived watchboard digest session use a distinct prompt, step budget, or resource limits from per-incident tasks. Only valid with --sink=ax and --ax-task-scope=incident.")
 	fs.StringVar(&f.axRouterURL, "ax-router-url", defaultAXRouterURL, "Agent Substrate router the ax sink reaches its tasks through (no trailing slash). An https URL is mutual TLS: lookout presents the pod certificate in --ax-router-credential-bundle and verifies the router against --ax-router-trust-bundle and --ax-router-server-name, which is the only ingress Substrate v0.6 and later serve; the pod's SPIFFE ID, spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>, must be in Substrate's ingressAllowedSPIFFEIDs. An http URL is plain HTTP, for a Substrate v0.5 or earlier router (the default before lookout v0.43). Only valid with --sink=ax.")
 	fs.StringVar(&f.axRouterBundle, "ax-router-credential-bundle", axsink.DefaultRouterCredentialBundle, "Client credential for an https --ax-router-url: the credentialBundlePath file of a podCertificate projected volume from signer podidentity.podcert.ate.dev/identity (a PKCS#8 private key followed by the certificate chain, leaf first). Re-read as the kubelet rotates it. The default is where Agent Substrate's own components mount it. Set it empty for one-way TLS against the system roots instead (a TLS-terminating front that does its own client authentication). Only valid with --sink=ax and an https --ax-router-url.")
 	fs.StringVar(&f.axRouterTrust, "ax-router-trust-bundle", axsink.DefaultRouterTrustBundle, "PEM bundle the router's certificate must chain to, for an https --ax-router-url with a credential bundle: a clusterTrustBundle projection of signer servicedns.podcert.ate.dev/identity, label podcert.ate.dev/canarying=live. Re-read as it rotates. Only valid with --sink=ax and --ax-router-credential-bundle.")
@@ -601,6 +603,9 @@ func (f *flags) validate() error {
 		if f.axTaskScope != axScopeIncident && f.axTaskScope != axScopeCluster {
 			return fmt.Errorf("--ax-task-scope must be incident or cluster (got %q)", f.axTaskScope)
 		}
+		if f.axWatchboardTaskTemplate != "" && f.axTaskScope != axScopeIncident {
+			return emit.UsageErrorf("--ax-watchboard-task-template is only valid with --ax-task-scope=incident: --ax-task-scope=cluster runs incidents and the watchboard in one shared task per cluster")
+		}
 		// A CA file or per-RPC bearer token without TLS is refused at startup.
 		if f.axCAFile != "" && !f.axServerTLS {
 			return emit.UsageErrorf("--ax-ca-file needs --ax-server-tls: the CA verifies the AX API's TLS certificate")
@@ -623,6 +628,8 @@ func (f *flags) validate() error {
 		}
 	} else if f.axServer != "" || f.axTaskTemplate != "" || f.axRouterURL != defaultAXRouterURL || f.axTaskScope != axScopeIncident {
 		return errors.New("--ax-server, --ax-task-template, --ax-router-url and --ax-task-scope are only valid with --sink=ax")
+	} else if f.axWatchboardTaskTemplate != "" {
+		return emit.UsageErrorf("--ax-watchboard-task-template is only valid with --sink=ax")
 	} else if f.axServerTLS || f.axCAFile != "" {
 		return emit.UsageErrorf("--ax-server-tls and --ax-ca-file are only valid with --sink=ax")
 	} else if f.axTokenEnv != "" {

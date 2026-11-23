@@ -48,6 +48,13 @@ func newAXSink(f *flags, token string) (*axsink.Sink, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	var wbTmpl *axapi.Task
+	if f.axWatchboardTaskTemplate != "" {
+		wbTmpl, err = loadAXTaskTemplate(f.axWatchboardTaskTemplate)
+		if err != nil {
+			return nil, nil, fmt.Errorf("--ax-watchboard-task-template: %w", err)
+		}
+	}
 	routerClient, closeRouter, err := axRouterHTTPClient(f)
 	if err != nil {
 		return nil, nil, err
@@ -64,14 +71,18 @@ func newAXSink(f *flags, token string) (*axsink.Sink, func(), error) {
 			log.Print(warning)
 		}
 	}
+	if wbTmpl != nil {
+		log.Printf("ax sink: watchboard task template %s (incident task template %s)", f.axWatchboardTaskTemplate, f.axTaskTemplate)
+	}
 	sink, err := axsink.New(axsink.Config{
-		Client:         axapi.NewAXClient(conn),
-		Template:       tmpl,
-		RouterURL:      f.axRouterURL,
-		BearerToken:    token,
-		AssertedCaller: f.owner,
-		Scope:          axsink.Scope(f.axTaskScope),
-		HTTPClient:     routerClient,
+		Client:             axapi.NewAXClient(conn),
+		Template:           tmpl,
+		WatchboardTemplate: wbTmpl,
+		RouterURL:          f.axRouterURL,
+		BearerToken:        token,
+		AssertedCaller:     f.owner,
+		Scope:              axsink.Scope(f.axTaskScope),
+		HTTPClient:         routerClient,
 	})
 	if err != nil {
 		release()

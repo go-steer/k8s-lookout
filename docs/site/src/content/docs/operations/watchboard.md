@@ -91,6 +91,20 @@ Per-kind routing is tunable with `--severity kind=level` (repeatable) —
 one recorded drill demoted a default-critical kind to warning
 (`--severity=objectstate.endpoints_empty=warning`) and another
 promoted `rollout.stall` to critical for a staging cluster where bad
-deploys are the hunt. The full decision record is
+deploys are the hunt.
+
+## Agent Executor (`--sink=ax`) task template
+
+Under `--sink=ax` with `--ax-task-scope=incident` (the default), the
+watchboard runs in one stable task per cluster
+(`lookout-wb-<cluster>-<hash8>`), with each rotated generation opening a
+fresh session inside that task. By default it is stamped from
+`--ax-task-template`, matching critical incident and storm tasks. Pass
+`--ax-watchboard-task-template=<path>` to give the watchboard task its
+own AX `Task` manifest — for example a multi-digest prompt, step budget,
+or idle policy distinct from the single-diagnosis incident agent — while
+critical incidents and storms continue using `--ax-task-template`.
+
+The full decision record is
 [`docs/watchboard-rotation-design.md`](https://github.com/go-steer/k8s-lookout/blob/main/docs/watchboard-rotation-design.md);
 the wire shapes are pinned byte-exact by tests.

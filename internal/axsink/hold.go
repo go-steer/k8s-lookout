@@ -196,12 +196,12 @@ func (s *Sink) stateOf(ctx context.Context, task string) taskState {
 	s.hold.mu.Lock()
 	last, ok := s.hold.lastReal[task]
 	s.hold.mu.Unlock()
-	recent := ok && s.now().Sub(last) < s.idleAfter
+	recent := ok && s.now().Sub(last) < s.idleAfterForTask(task)
 	// Bounded: the dispatcher calls Append on the source's emit goroutine,
 	// so a hung AX API must not stall the source. A timeout is an error
 	// like any other, and the record decides.
 	gctx, cancel := context.WithTimeout(ctx, getTaskTimeout)
-	t, err := s.cfg.Client.GetTask(gctx, &axapi.GetTaskRequest{Atespace: s.atespace, Name: task})
+	t, err := s.cfg.Client.GetTask(gctx, &axapi.GetTaskRequest{Atespace: s.atespaceForTask(task), Name: task})
 	cancel()
 	phase := t.GetStatus().GetPhase()
 	switch {
@@ -227,7 +227,7 @@ func (s *Sink) goneError(task string) error {
 	return &inject.StatusError{
 		Op:   "ax sink: Append",
 		Code: http.StatusNotFound,
-		Body: fmt.Sprintf("task %s/%s is gone: AX has no such task, or its actor was removed", s.atespace, task),
+		Body: fmt.Sprintf("task %s/%s is gone: AX has no such task, or its actor was removed", s.atespaceForTask(task), task),
 	}
 }
 
@@ -244,7 +244,7 @@ func (s *Sink) confirmGone(ctx context.Context, task string, err error) error {
 		return err
 	}
 	gctx, cancel := context.WithTimeout(ctx, getTaskTimeout)
-	t, gerr := s.cfg.Client.GetTask(gctx, &axapi.GetTaskRequest{Atespace: s.atespace, Name: task})
+	t, gerr := s.cfg.Client.GetTask(gctx, &axapi.GetTaskRequest{Atespace: s.atespaceForTask(task), Name: task})
 	cancel()
 	if !taskGoneIn(t, gerr) {
 		return err

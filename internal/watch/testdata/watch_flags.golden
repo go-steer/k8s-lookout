@@ -13,6 +13,7 @@ ax-server-tls	bool	"false"	stable
 ax-task-scope	string	"incident"	stable
 ax-task-template	string	""	stable
 ax-token-env	string	""	stable
+ax-watchboard-task-template	string	""	stable
 backoff-min-count	int	"3"	stable
 burn-eta	duration	"30m0s"	stable
 burn-multiple	float	"4"	stable

@@ -85,10 +85,18 @@ type SessionStore interface {
 type Config struct {
 	// Client is the AX API client. Required.
 	Client axapi.AXClient
-	// Template is the Task every incident runs as: image, command, egress,
+	// Template is the Task every incident and storm runs as (and the
+	// watchboard when WatchboardTemplate is nil): image, command, egress,
 	// credentials, http.port. The sink sets metadata.name per task and
 	// never changes anything else. metadata.atespace defaults to "default".
 	Template *axapi.Task
+	// WatchboardTemplate, when non-nil, is the Task the cluster's
+	// watchboard task (lookout-wb-<cluster>-<hash8>) runs as instead of
+	// Template (#847). Nil defaults to Template so existing deployments
+	// behave identically. Only valid with ScopeIncident: ScopeCluster runs
+	// incidents, storms, and watchboard digests in one shared task per
+	// cluster.
+	WatchboardTemplate *axapi.Task
 	// RouterURL is Agent Substrate's router, e.g.
 	// "http://atenet-router.ate-system.svc.cluster.local", without a
 	// trailing slash. Requests carry ate-target-actor: <atespace>/<task>.
@@ -128,10 +136,13 @@ type injectorEntry struct {
 // "<task>/<session>": the task carries the incident, the session is the
 // agent's conversation for it inside the task.
 type Sink struct {
-	cfg      Config
-	atespace string
-	base     *http.Client
-	stores   sync.Map // cluster -> SessionStore
+	cfg                Config
+	template           *axapi.Task
+	watchboardTemplate *axapi.Task
+	atespace           string
+	watchboardAtespace string
+	base               *http.Client
+	stores             sync.Map // cluster -> SessionStore
 
 	injMu     sync.Mutex
 	injectors map[string]*injectorEntry // task name -> cached injector + lastUsed
@@ -139,8 +150,9 @@ type Sink struct {
 	mu         sync.Mutex
 	remembered map[string]string // IncidentKey.String() -> "<task>/<session>"
 
-	hold      *holder       // held reminders and each task's last real inject (hold.go)
-	idleAfter time.Duration // a task with no real inject for this long is idle
+	hold                *holder       // held reminders and each task's last real inject (hold.go)
+	idleAfter           time.Duration // a task with no real inject for this long is idle
+	watchboardIdleAfter time.Duration // watchboard task idle window (WatchboardTemplate)
 }
 
 func (s *Sink) now() time.Time {
@@ -164,6 +176,9 @@ func New(cfg Config) (*Sink, error) {
 	if cfg.Template == nil || cfg.Template.GetSpec() == nil {
 		return nil, errors.New("ax sink: a task template with a spec is required")
 	}
+	if cfg.WatchboardTemplate != nil && cfg.WatchboardTemplate.GetSpec() == nil {
+		return nil, errors.New("ax sink: watchboard task template must have a spec")
+	}
 	if cfg.RouterURL == "" || strings.HasSuffix(cfg.RouterURL, "/") {
 		return nil, fmt.Errorf("ax sink: router URL is required and must not end with '/' (got %q)", inject.RedactedURL(cfg.RouterURL))
 	}
@@ -177,6 +192,9 @@ func New(cfg Config) (*Sink, error) {
 	default:
 		return nil, fmt.Errorf("ax sink: task scope must be %q or %q (got %q)", ScopeIncident, ScopeCluster, cfg.Scope)
 	}
+	if cfg.WatchboardTemplate != nil && cfg.Scope != ScopeIncident {
+		return nil, fmt.Errorf("ax sink: watchboard task template is only valid with scope %q (got %q)", ScopeIncident, cfg.Scope)
+	}
 	if cfg.StartTimeout <= 0 {
 		cfg.StartTimeout = 2 * time.Minute
 	}
@@ -184,19 +202,62 @@ func New(cfg Config) (*Sink, error) {
 	if base == nil {
 		base = inject.NewSinkHTTPClient()
 	}
-	atespace := cfg.Template.GetMetadata().GetAtespace()
-	if atespace == "" {
-		atespace = "default"
+	tmpl := proto.Clone(cfg.Template).(*axapi.Task)
+	wbTmpl := tmpl
+	if cfg.WatchboardTemplate != nil {
+		wbTmpl = proto.Clone(cfg.WatchboardTemplate).(*axapi.Task)
 	}
+	atespace := atespaceOf(tmpl)
+	wbAtespace := atespaceOf(wbTmpl)
 	return &Sink{
-		cfg:        cfg,
-		atespace:   atespace,
-		base:       base,
-		injectors:  map[string]*injectorEntry{},
-		remembered: map[string]string{},
-		hold:       newHolder(),
-		idleAfter:  idleAfterFor(cfg.Template),
+		cfg:                 cfg,
+		template:            tmpl,
+		watchboardTemplate:  wbTmpl,
+		atespace:            atespace,
+		watchboardAtespace:  wbAtespace,
+		base:                base,
+		injectors:           map[string]*injectorEntry{},
+		remembered:          map[string]string{},
+		hold:                newHolder(),
+		idleAfter:           idleAfterFor(tmpl),
+		watchboardIdleAfter: idleAfterFor(wbTmpl),
 	}, nil
+}
+
+func atespaceOf(t *axapi.Task) string {
+	if ns := t.GetMetadata().GetAtespace(); ns != "" {
+		return ns
+	}
+	return "default"
+}
+
+// isWatchboardTask reports whether task is a per-cluster watchboard task
+// (lookout-wb-<cluster>-<hash8>). Under ScopeIncident, incident and storm
+// tasks are "lookout-" + 16 lowercase hex digits, so they never carry the
+// "lookout-wb-" prefix ('w' is not hex).
+func (s *Sink) isWatchboardTask(task string) bool {
+	return s.cfg.Scope == ScopeIncident && strings.HasPrefix(task, "lookout-wb-")
+}
+
+func (s *Sink) templateForTask(task string) *axapi.Task {
+	if s.isWatchboardTask(task) {
+		return s.watchboardTemplate
+	}
+	return s.template
+}
+
+func (s *Sink) atespaceForTask(task string) string {
+	if s.isWatchboardTask(task) {
+		return s.watchboardAtespace
+	}
+	return s.atespace
+}
+
+func (s *Sink) idleAfterForTask(task string) time.Duration {
+	if s.isWatchboardTask(task) {
+		return s.watchboardIdleAfter
+	}
+	return s.idleAfter
 }
 
 // UseSessionStore makes the sink remember cluster's incident sessions in
@@ -216,7 +277,7 @@ func (s *Sink) isTaskKnownAwake(task string) bool {
 	s.hold.mu.Lock()
 	last, ok := s.hold.lastReal[task]
 	s.hold.mu.Unlock()
-	return ok && s.now().Sub(last) < s.idleAfter
+	return ok && s.now().Sub(last) < s.idleAfterForTask(task)
 }
 
 func (s *Sink) clearAwake(task string) {
@@ -467,12 +528,13 @@ func (s *Sink) startTask(ctx context.Context, task string) error {
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.StartTimeout)
 	defer cancel()
 
-	t := proto.Clone(s.cfg.Template).(*axapi.Task)
+	atespace := s.atespaceForTask(task)
+	t := proto.Clone(s.templateForTask(task)).(*axapi.Task)
 	if t.Metadata == nil {
 		t.Metadata = &axapi.ObjectMeta{}
 	}
 	t.Metadata.Name = task
-	t.Metadata.Atespace = s.atespace
+	t.Metadata.Atespace = atespace
 	if t.ApiVersion == "" {
 		t.ApiVersion = "ax.io/v1alpha1"
 	}
@@ -483,12 +545,12 @@ func (s *Sink) startTask(ctx context.Context, task string) error {
 		// AX refuses a second task with the same name (FailedPrecondition:
 		// tasks are immutable). That's the reopen case: use the task. Ask
 		// rather than match the error, so any other failure still surfaces.
-		if _, gerr := s.cfg.Client.GetTask(ctx, &axapi.GetTaskRequest{Atespace: s.atespace, Name: task}); gerr != nil {
-			return fmt.Errorf("ax sink: creating task %s/%s: %w", s.atespace, task, err)
+		if _, gerr := s.cfg.Client.GetTask(ctx, &axapi.GetTaskRequest{Atespace: atespace, Name: task}); gerr != nil {
+			return fmt.Errorf("ax sink: creating task %s/%s: %w", atespace, task, err)
 		}
 	}
-	if _, err := s.cfg.Client.ResumeTask(ctx, &axapi.ResumeTaskRequest{Atespace: s.atespace, Name: task}); err != nil {
-		return fmt.Errorf("ax sink: resuming task %s/%s: %w", s.atespace, task, err)
+	if _, err := s.cfg.Client.ResumeTask(ctx, &axapi.ResumeTaskRequest{Atespace: atespace, Name: task}); err != nil {
+		return fmt.Errorf("ax sink: resuming task %s/%s: %w", atespace, task, err)
 	}
 	return s.waitReady(ctx, task)
 }
@@ -527,7 +589,7 @@ func (s *Sink) waitReady(ctx context.Context, task string) error {
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("ax sink: task %s/%s not ready: %w (last attempt: %s)", s.atespace, task, ctx.Err(), last)
+			return fmt.Errorf("ax sink: task %s/%s not ready: %w (last attempt: %s)", s.atespaceForTask(task), task, ctx.Err(), last)
 		case <-time.After(time.Second):
 		}
 	}
@@ -574,7 +636,7 @@ func (s *Sink) routedClient(task string) *http.Client {
 		base = http.DefaultTransport
 	}
 	c := *s.base
-	c.Transport = actorTransport{base: base, actor: s.atespace + "/" + task}
+	c.Transport = actorTransport{base: base, actor: s.atespaceForTask(task) + "/" + task}
 	return &c
 }
 

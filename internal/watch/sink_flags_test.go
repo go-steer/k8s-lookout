@@ -47,9 +47,13 @@ func TestSinkFlags_Defaults(t *testing.T) {
 	if f.axServerTLS || f.axCAFile != "" || f.axTokenEnv != "" {
 		t.Errorf("default --ax-server-tls = %v, --ax-ca-file = %q, --ax-token-env = %q, want false and empty", f.axServerTLS, f.axCAFile, f.axTokenEnv)
 	}
+	// #847: --ax-watchboard-task-template defaults empty (falls back to --ax-task-template).
+	if f.axWatchboardTaskTemplate != "" {
+		t.Errorf("default --ax-watchboard-task-template = %q, want empty", f.axWatchboardTaskTemplate)
+	}
 }
 
-// The #580 TLS and bearer-token flag errors are usage errors (exit 2, DESIGN.md §4.2).
+// The #580 TLS / bearer-token and #847 watchboard-template flag errors are usage errors (exit 2, DESIGN.md §4.2).
 func TestSinkFlags_AXTLSErrorsAreUsageErrors(t *testing.T) {
 	t.Parallel()
 	for _, args := range [][]string{
@@ -58,6 +62,9 @@ func TestSinkFlags_AXTLSErrorsAreUsageErrors(t *testing.T) {
 		{"--dry-run", "--ax-server-tls"},
 		{"--dry-run", "--ax-token-env=AX_TOK"},
 		{"--sink=webhook", "--dry-run", "--ax-token-env=AX_TOK"},
+		{"--dry-run", "--ax-watchboard-task-template=wb.yaml"},
+		{"--sink=webhook", "--dry-run", "--ax-watchboard-task-template=wb.yaml"},
+		{"--sink=ax", "--dry-run", "--ax-task-scope=cluster", "--ax-watchboard-task-template=wb.yaml"},
 	} {
 		f, err := parseFlags(args)
 		if err != nil {
@@ -142,6 +149,34 @@ func TestSinkFlags_ValidationMatrix(t *testing.T) {
 		{
 			name: "ax incident task scope is valid",
 			args: []string{"--sink=ax", "--dry-run", "--ax-task-scope=incident"},
+		},
+		{
+			name: "ax with distinct watchboard task template is valid",
+			args: []string{"--sink=ax", "--ax-server=ax:8080", "--ax-task-template=incident.yaml", "--ax-watchboard-task-template=watchboard.yaml", "--token-env=TOK"},
+		},
+		{
+			name: "ax watchboard task template allowed in dry-run",
+			args: []string{"--sink=ax", "--dry-run", "--ax-watchboard-task-template=watchboard.yaml"},
+		},
+		{
+			name:    "ax watchboard task template still requires ax-task-template",
+			args:    []string{"--sink=ax", "--ax-server=ax:8080", "--ax-watchboard-task-template=watchboard.yaml", "--token-env=TOK"},
+			wantErr: "--ax-task-template is required",
+		},
+		{
+			name:    "ax rejects watchboard task template with cluster task scope",
+			args:    []string{"--sink=ax", "--dry-run", "--ax-task-scope=cluster", "--ax-watchboard-task-template=watchboard.yaml"},
+			wantErr: "--ax-watchboard-task-template is only valid with --ax-task-scope=incident",
+		},
+		{
+			name:    "core-agent rejects ax-watchboard-task-template",
+			args:    []string{"--ax-watchboard-task-template=watchboard.yaml", "--dry-run"},
+			wantErr: "--ax-watchboard-task-template is only valid with --sink=ax",
+		},
+		{
+			name:    "webhook rejects ax-watchboard-task-template",
+			args:    []string{"--sink=webhook", "--sink-url=https://hooks.example", "--ax-watchboard-task-template=watchboard.yaml"},
+			wantErr: "--ax-watchboard-task-template is only valid with --sink=ax",
 		},
 		{
 			name:    "ax rejects an unknown task scope",
