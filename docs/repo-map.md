@@ -36,6 +36,7 @@ k8s-lookout/
 │   │   │                 #   and the ledger of finding kinds the command may emit
 │   │   ├── registry.go   # the metadata registry all generated surfaces read from; also
 │   │   │                 #   KindGlossary(), the finding-kind union across every command
+│   │   ├── crd/          # discovery-gated unstructured reader seam (state gateway, keda, kcc)
 │   │   └── checktest/    # §13 contract-test scaffold every command suite runs
 │   ├── cloud/            # Provider interface + capability registry; pkg/cloud/gke is the
 │   │                     #   only implementation, compiled in via build tags only
@@ -59,14 +60,25 @@ k8s-lookout/
 │   │                     #   rbac.go declares per-source RBAC rules
 │   └── store/            # sentinel-local SQLite: occurrences, graph history, records
 ├── skills/               # workflow skills + playbooks; references/ are GENERATED
-├── deploy/               # sentinel manifests + Helm chart (deploy/chart): SA, read-only
-│                         #   ClusterRole(+Binding), capacity Role(+Binding), Deployment
+├── deploy/               # cluster-wide sentinel Kustomize base + Helm chart (deploy/chart) +
+│                         #   prometheus-operator/ ServiceMonitor: SA, read-only ClusterRole,
+│                         #   kube-system capacity Role, NetworkPolicy, Service, Deployment
+├── deploy-ax/            # sentinel overlay swapping --daemon-url for --sink=ax + Substrate mTLS
+├── deploy-mcp-gemini/    # standalone `lookout mcp` Gateway deployment for Gemini Enterprise
+│                         #   (per-caller Google OAuth + optional oauth/ generic-client component)
+├── deploy-mcp-gemini-gateway/ # deprecated compatibility alias re-exporting deploy-mcp-gemini/
+├── deploy-namespaced/    # namespace-scoped sentinel (--watch-scope=namespace: Role + node/PV read)
+├── deploy-namespaced-strict/  # Role-only namespace-scoped sentinel (no cluster-scoped grants)
+├── deploy-no-secrets/    # cluster-wide sentinel overlay without secrets/serviceaccounts list
+├── deploy-probe/         # opt-in privileged overlay adding pods/ephemeralcontainers + VAP for
+│                         #   `lookout net probe-from` (top-level: Kustomize forbids nested overlays)
 ├── dev/
 │   ├── ci/presubmits/    # the exact checks CI runs, individually invokable
 │   ├── drills/           # GKE/kind replay runbooks (node-failure, bad-deploy, memory-leak,
 │   │                     #   quota-exhaustion) + stub-daemon.py capture sink
-│   └── tools/            # ci (runs all presubmits), build, lint-go, test-unit,
+│   └── tools/            # ci (runs all presubmits), build, lint-go, test-unit, docs-lint,
 │                         #   gen-skill-refs, gen-site-docs, new-check, verify-helm-parity, …
+├── scripts/              # verify-internal-links.py (built Starlight HTML + repo Markdown links)
 ├── examples/             # runnable e2e: kind recipe, sentinel + capture stub, demo
 │                         #   workloads, inject/verify/revert failure scenarios, e2e driver,
 │                         #   agent-harness (skills/MCP) testing guide
@@ -110,7 +122,7 @@ Violating any of these is a bug, not a test update
 | Contract | Lives in | Guardian test |
 | --- | --- | --- |
 | `lookout watch` flag surface (M0 image-swap compat) | `internal/watch/main.go` | `internal/watch/flags_contract_test.go` (`TestFlagSurfaceFrozen`; additive flags get their own pin tests) |
-| Inject wire payloads, incl. byte-frozen M0 `k8s-event`/`k8s-event-followup` pair (re-baselined once 2026-07-27: + `type` field — dated pre-consumer amendment, `signal-schema-v1.md` §Amendments) | `pkg/inject/injector.go` | `pkg/inject/schema_freeze_test.go` (field-set ledger, 32-kind inventory, byte-exact round-trip) |
+| Inject wire payloads, incl. byte-frozen M0 `k8s-event`/`k8s-event-followup` pair (re-baselined once 2026-07-27: + `type` field — dated pre-consumer amendment, `signal-schema-v1.md` §Amendments) | `pkg/inject/injector.go` | `pkg/inject/schema_freeze_test.go` (field-set ledger, 59-kind inventory: 51 active + 8 retired in `pkg/inject/schema/schema.go`, byte-exact round-trip) |
 | Webhook sink wire (`POST /incidents` + `/incidents/<id>/events`, schema-v1 payload as the body — never the daemon envelope; re-pinned 2026-07-27 with the `type` amendment) | `pkg/inject/webhook.go` | `internal/watch/webhook_dispatch_test.go` (byte-exact open/append pins: k8s-event, resolved, storm, watchboard.digest, watchboard.rotated) |
 | Signal-schema v1 ledger (the fleet-rollup contract) | [`signal-schema-v1.md`](./signal-schema-v1.md) | same freeze tests; removal/rename is a v2 negotiation with fleet consumers, additions extend ledger + doc together |
 | engine↔inject kind constants stay one value | `pkg/engine/signal.go`, `pkg/inject` | `internal/watch/signal_contract_test.go` |
@@ -184,7 +196,7 @@ cannot silently drift from tool output.
 | pipeline drills: scripted signal streams through the REAL dispatcher | `internal/watch/*_dispatch_test.go`, `m5_corpus_rollup_test.go` (storms, recovery, routing, quota, corpus, rollup) |
 | doc-example validation | `internal/skilldoc/examples_test.go` |
 | live-cluster replay drills (human-run, never CI) | `dev/drills/*.md` runbooks + `stub-daemon.py` |
-| Gemini Enterprise token spike (human-run, never CI; its own Go module, so steward stays out of lookout's go.mod) | `dev/drills/ge-token-spike/` (#698) |
+| Gemini Enterprise token spike (human-run, never CI; standalone Go module for isolated Cloud Build deployment to Cloud Run — pre-#699 spike; `lookout`'s root `go.mod` now requires `steward` and `purser` directly for `lookout mcp` and `internal/axsink`) | `dev/drills/ge-token-spike/` (#698) |
 | live-cluster e2e scenarios (local kind / GKE staging; in CI only non-blocking — post-merge smoke + weekly full via `e2e-kind.yml`) | `examples/e2e` + `examples/scenarios/*` (inject/verify/revert against the wire capture + read-path) |
 
 CI: `dev/tools/ci` runs the same steps as `.github/workflows/ci.yml`

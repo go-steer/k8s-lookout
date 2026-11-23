@@ -2,9 +2,10 @@
 
 Everything needed to see lookout work against **real workloads and
 real failures**: a kind cluster recipe, the sentinel wired to a
-capture stub (no core-agent required), a small demo app, and ten
-inject/verify/revert failure scenarios that drive both halves of the
-binary — the sentinel's push path and the read-path CLI.
+capture stub (no core-agent required), a small demo app, and
+inject/verify/revert failure scenarios under [`scenarios/`](./scenarios/)
+that drive both halves of the binary — the sentinel's push path and the
+read-path CLI.
 
 This sits between the unit/contract suites (CI) and the human-run
 [`dev/drills/`](../dev/drills/) runbooks (real GKE, store forensics,

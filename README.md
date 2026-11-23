@@ -120,8 +120,9 @@ startup, never as a silently empty watch.
 
 Want to see both halves against real failures first?
 [`examples/`](./examples/) stands up a kind cluster, the sentinel
-against a capture stub, demo workloads, and ten inject/verify/revert
-failure scenarios (`examples/e2e` runs the lot) — plus the recipe for
+against a capture stub, demo workloads, and inject/verify/revert failure
+scenarios under [`examples/scenarios/`](./examples/scenarios/)
+(`examples/e2e` runs the suite) — plus the recipe for
 testing the CLI through agent harnesses via skills or MCP.
 
 ## Command surface
@@ -207,7 +208,7 @@ scanned=0 findings=1 elapsed=0s unavailable="no cloud provider configured"
 Every finding these commands emit carries a `kind=`, and every kind
 they can emit is declared on the command itself — the whole vocabulary,
 with its claim and its severities, is one table:
-[Finding kinds](https://k8s-lookout.dev/reference/finding-kinds/). A
+[Finding kinds](https://go-steer.github.io/k8s-lookout/reference/finding-kinds/). A
 kind missing from a run means the check looked and found nothing; a
 check that could not run says so instead.
 
