@@ -79,32 +79,28 @@ k8s-lookout/
 
 ## The two data paths
 
-Read-path — one implementation, three invocation surfaces (§4.3):
+End-to-end Mermaid architecture and data-flow diagrams live on the
+documentation site (verified against live source/sink/table/flag
+ledgers in CI):
 
-```
-            CLI (cmd/lookout) ─┐
-     MCP (internal/mcpserver) ─┼─→ pkg/checks ─→ pkg/emit envelope + sanitizer ─→ stdout / MCP response
-enrichment (internal/watch) ───┘        │              (summary line, exit 0)      / inject attachment
-                                        ├── pkg/graph (radius, edges, changes, --at history)
-                                        └── pkg/sources/saturation (checks/top only: the shared
-                                            metrics fetcher/sample seam — deliberate §10.2 crossing
-                                            so the metrics-client join exists exactly once)
-```
-
-Watch-path — the sentinel pipeline (§7.1), wired in `internal/watch`:
-
-```
-pkg/sources ─→ filter ─→ dedup ─→ storm ─→ severity ─→ enrichment ─→ pkg/inject ─→ sink:
-              └────────────── pkg/engine ──────────┘   (pkg/checks,     (Sink)     daemon sessions
-                                 │                      in-process)                | webhook / AX sink
-        pkg/store (occurrences, graph history, §9.2/§9.4 records via pkg/memory)
-        pkg/graph (blast-radius keys for storm correlation; snapshots into the store)
-```
-
-Recovery closes the loop: the dispatcher watches bound incidents'
-symptoms clear and injects `resolved`/`resolved.reverted` into the same
-session — which is what makes the §9.3 corpus (`pkg/corpus`)
-harvestable with ground-truth labels.
+- **Read-path (`cmd/lookout`, `internal/mcpserver`, `internal/watch` enrichment → `pkg/checks` → `pkg/emit.Writer`):**
+  [Architecture → The read-path](https://go-steer.github.io/k8s-lookout/concepts/architecture/#the-read-path)
+  and [MCP setup → Request & identity flow](https://go-steer.github.io/k8s-lookout/getting-started/mcp/#request--identity-flow).
+  One deliberate §10.2 package crossing on the read path: `pkg/checks/top`
+  imports `pkg/sources/saturation`'s metrics fetcher/sample seam so the
+  `metrics.k8s.io` client join exists in one place.
+- **Watch-path (`pkg/sources` → `pkg/engine` → `internal/watch` → `pkg/inject` / `internal/axsink` + recovery loop):**
+  [Architecture → The watch-path](https://go-steer.github.io/k8s-lookout/concepts/architecture/#the-watch-path).
+  Recovery closes the loop: `engine.RecoveryTracker` watches bound
+  incidents' symptoms clear and injects `resolved` / `resolved.reverted`
+  into the same session — making the §9.3 corpus (`pkg/corpus`)
+  harvestable with ground-truth labels.
+- **Posture (`audit.Snapshot`, detectors, four-layer `pkg/policy`, `pkg/exempt`, `PostureFingerprint`, `findings diff` / `ack`):**
+  [Audit cluster posture & track drift → Posture pipeline](https://go-steer.github.io/k8s-lookout/guides/posture-audit/#posture-pipeline).
+- **SQLite store (`pkg/store` writers, readers, and pruned vs. durable tables):**
+  [The occurrence store → Who writes and reads each table](https://go-steer.github.io/k8s-lookout/operations/store/#who-writes-and-reads-each-table).
+- **Deployment (`deploy/base/`, composable `deploy/components/*`, `deploy/mcp/` Gateway, and `deploy/chart/`):**
+  [Deploy the sentinel → Deployment architecture, RBAC tiers & sinks](https://go-steer.github.io/k8s-lookout/getting-started/deploy/#deployment-architecture-rbac-tiers--sinks).
 
 ## Frozen contracts and their guardian tests
 

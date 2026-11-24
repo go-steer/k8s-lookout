@@ -38,6 +38,8 @@
 #                                    over README.md, docs/**, and deploy*/**/*.md
 #  11. Deployment variants ledger  — every deploy* directory has a README.md and
 #                                    appears in docs/repo-map.md ## Deployment variants
+#  12. Mermaid diagram vocabulary  — Mermaid blocks only name active sources,
+#                                    sinks, and SQLite tables (never retired #842 ones)
 #
 # Scope:
 #   Prose-count rules (1–5, 7–9) scan root contributor/user docs (README.md,
@@ -154,6 +156,55 @@ for entry in entries:
         active += 1
 
 print(f"{active + retired} {active} {retired}")
+PY
+)
+
+read -r LIVE_SOURCES_CSV LIVE_SINKS_CSV LIVE_TABLES_CSV < <(
+  python3 - internal/watch/flags.go pkg/store/store.go <<'PY'
+import glob
+import pathlib
+import re
+import sys
+
+flags_src = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+store_src = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+
+pkg_name_map: dict[str, str] = {}
+for src_go in glob.glob("pkg/sources/*/*.go"):
+    if src_go.endswith("_test.go"):
+        continue
+    txt = pathlib.Path(src_go).read_text(encoding="utf-8")
+    pm = re.search(r"^package\s+([a-z0-9_]+)", txt, re.M)
+    nm = re.search(r'\bName\s*=\s*"([a-z0-9-]+)"', txt)
+    if pm and nm:
+        pkg_name_map[pm.group(1)] = nm.group(1)
+
+km = re.search(r"var\s+knownSources\s*=\s*\[\]string\{([^}]+)\}", flags_src)
+if not km:
+    raise SystemExit("failed to parse knownSources from internal/watch/flags.go")
+sources: list[str] = []
+for m in re.finditer(r"([a-z0-9_]+)\.Name\b", km.group(1)):
+    pkg = m.group(1)
+    if pkg not in pkg_name_map:
+        raise SystemExit(f"knownSources entry {pkg}.Name has no matching package in pkg/sources/*")
+    sources.append(pkg_name_map[pkg])
+sources = sorted(set(sources))
+if not sources:
+    raise SystemExit("resolved zero knownSources from pkg/sources/*")
+
+sinks = sorted(set(re.findall(r'\bsink[A-Z][A-Za-z0-9]*\s*=\s*"([a-z0-9-]+)"', flags_src)))
+if not sinks:
+    raise SystemExit("failed to parse sink constants from internal/watch/flags.go")
+
+retired_tables = {"schema_version", "leeway_alert_state", "leeway_baseline"}
+tables = sorted(
+    t for t in set(re.findall(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z0-9_]+)", store_src, re.I))
+    if t not in retired_tables
+)
+if not tables:
+    raise SystemExit("failed to parse SQLite tables from pkg/store/store.go")
+
+print(f"{','.join(sources)} {','.join(sinks)} {','.join(tables)}")
 PY
 )
 
@@ -605,6 +656,83 @@ if table_sorted != live:
 PY
 }
 
+# Check 12: Mermaid diagram vocabulary against live sources, sinks, and SQLite tables (#848).
+check_mermaid_diagrams() {
+  local path="$1"
+  grep -q '```mermaid' "$path" 2>/dev/null || return 0
+
+  python3 - "$path" "$LIVE_SOURCES_CSV" "$LIVE_SINKS_CSV" "$LIVE_TABLES_CSV" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+sources = set(sys.argv[2].split(","))
+sinks = set(sys.argv[3].split(","))
+tables = set(sys.argv[4].split(","))
+retired_tokens = ("topology-drift", "compute-class", "leeway_alert_state", "leeway_baseline")
+
+raw = open(path, encoding="utf-8").read()
+block_re = re.compile(r"```mermaid[ \t]*\r?\n(.*?)```", re.S)
+flag_re = re.compile(r"(^|[^a-zA-Z0-9_.-])--([a-z][a-z0-9-]*)")
+sink_re = re.compile(r"--sink=([a-z0-9-]+)")
+src_re = re.compile(r"--sources=([a-z0-9.,-]+)")
+cyl_re = re.compile(r'\[\("([a-z0-9_]+)(?:<br/>|["\s])')
+hyphen_re = re.compile(r"\b[a-z][a-z0-9]*(?:-[a-z0-9]+)+\b")
+srcs_allow = {"sources", "auto-probed", "explicit-only"}
+
+for m in block_re.finditer(raw):
+    lineno = raw.count("\n", 0, m.start()) + 1
+    body = m.group(1).strip()
+    if not body:
+        print(f"{path}:{lineno}: empty ```mermaid diagram block")
+        continue
+    first = body.splitlines()[0].strip()
+    if not (first.startswith("flowchart ") or first.startswith("graph ") or first.startswith("sequenceDiagram")):
+        print(f"{path}:{lineno}: unsupported Mermaid diagram header {first!r}")
+    subgraphs = sum(1 for ln in body.splitlines() if ln.strip().startswith("subgraph "))
+    ends = sum(1 for ln in body.splitlines() if ln.strip() == "end")
+    if subgraphs != ends:
+        print(f"{path}:{lineno}: unbalanced Mermaid subgraph/end ({subgraphs} subgraph vs {ends} end)")
+
+    for ret in retired_tokens:
+        if ret in body:
+            print(f"{path}:{lineno}: Mermaid diagram contains retired #842 identifier {ret!r}")
+
+    for sm in sink_re.finditer(body):
+        val = sm.group(1)
+        if val not in sinks:
+            print(f"{path}:{lineno}: Mermaid diagram names unknown --sink={val} (known: {', '.join(sorted(sinks))})")
+
+    for srm in src_re.finditer(body):
+        for part in srm.group(1).split(","):
+            if part in ("", "auto", "..."):
+                continue
+            if part not in sources:
+                print(f"{path}:{lineno}: Mermaid diagram names unknown --sources entry {part!r}")
+
+    in_srcs = False
+    for ln in body.splitlines():
+        s = ln.strip()
+        if s.startswith("subgraph Srcs["):
+            in_srcs = True
+            continue
+        if in_srcs and s == "end":
+            in_srcs = False
+            continue
+        if not in_srcs:
+            continue
+        no_flags = flag_re.sub(r"\1", s)
+        for tok in hyphen_re.findall(no_flags.lower()):
+            if tok not in srcs_allow and tok not in sources:
+                print(f"{path}:{lineno}: Mermaid Srcs subgraph names unknown source {tok!r}")
+
+    for cm in cyl_re.finditer(body):
+        tbl = cm.group(1)
+        if tbl not in tables:
+            print(f"{path}:{lineno}: Mermaid diagram names unknown or retired SQLite table {tbl!r}")
+PY
+}
+
 # ---- driver -----------------------------------------------------------
 
 run_all_checks() {
@@ -621,6 +749,7 @@ run_all_checks() {
       check_flag_counts "$path"
       check_scenario_counts "$path"
       check_kind_counts "$path"
+      check_mermaid_diagrams "$path"
     )
     if [[ -n "$out" ]]; then
       printf '%s\n' "$out"
@@ -796,8 +925,47 @@ EOF
     out=1
   fi
 
+  cat > "$tmp/mermaid-bad.md" <<'EOF'
+# Bad Mermaid fixture
+
+```mermaid
+flowchart TB
+  subgraph Srcs["Sources"]
+    A["topology-drift, bogus-src"]
+  end
+  B["--sink=pagerduty --sources=k8s-events,ghost"]
+  T[("leeway_alert_state<br/>retired")]
+  T2[("unknown_table<br/>bad")]
+  subgraph Unclosed["Broken"]
+    A --> B
+```
+
+```mermaid
+```
+EOF
+  n=$(check_mermaid_diagrams "$tmp/mermaid-bad.md" | wc -l)
+  (( n >= 7 )) || { echo "self-test: check_mermaid_diagrams fired $n times, expected ≥7"; out=1; }
+
+  cat > "$tmp/mermaid-clean.md" <<'EOF'
+# Clean Mermaid fixture
+
+```mermaid
+flowchart TB
+  subgraph Srcs["Signal Sources"]
+    A["--sources=auto<br/>k8s-events, object-state"]
+  end
+  S["--sink=core-agent | --sink=webhook | --sink=ax"]
+  T[("occurrences<br/>rows")]
+  A --> S --> T
+```
+EOF
+  if [[ -n "$(check_mermaid_diagrams "$tmp/mermaid-clean.md")" ]]; then
+    echo "self-test: unexpected check_mermaid_diagrams finding on clean fixture"
+    out=1
+  fi
+
   if (( out == 0 )); then
-    echo "docs-lint self-test: OK (all rules + deploy-variants + internal link self-test passed)"
+    echo "docs-lint self-test: OK (all rules + mermaid + deploy-variants + internal link self-test passed)"
   fi
   return $out
 }

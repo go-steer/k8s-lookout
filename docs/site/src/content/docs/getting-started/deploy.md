@@ -25,6 +25,57 @@ manifests reference the namespace and Secret but deliberately do not
 create them. From a clone, `kubectl apply -k deploy/` applies the same
 set (use `-k`, not `-f` — the directory carries the kustomization).
 
+## Deployment architecture, RBAC tiers & sinks
+
+`deploy/base/` is the cluster-wide sentinel base, `deploy/components/*` layers composable RBAC/scope/sink `Component`s on top, `deploy/mcp/` serves `lookout mcp` behind an HTTPS `Gateway`, and `deploy/chart/` parameterizes the same topology in Helm:
+
+```mermaid
+flowchart TB
+  subgraph Kust["Kustomize Bases, Components &amp; Helm Chart (deploy/)"]
+    direction TB
+    Base["deploy/base/ (alias: deploy/)<br/>Cluster-wide lookout watch<br/>Read-only ClusterRole + kube-system capacity Role<br/>Default --sink=core-agent (or Helm sink.type=webhook)"]
+
+    subgraph Comps["Composable Kustomize Components (deploy/components/*)"]
+      direction LR
+      ScopeNS["scope-namespaced<br/>Per-namespace Role +<br/>minimal node/PV ClusterRole<br/>(Helm: rbac.scope=namespace)"]
+      ScopeStrict["scope-namespaced-strict<br/>Role-only, zero cluster grants<br/>(Helm: rbac.scope=namespace,<br/>rbac.nodes=false)"]
+      NoSec["no-secrets<br/>Drop secrets &amp; serviceaccounts list<br/>--enrich-lists=all,-secrets,-serviceaccounts<br/>(Helm: rbac.secrets=false)"]
+      Probe["probe-from<br/>pods/ephemeralcontainers +<br/>ValidatingAdmissionPolicy<br/>(Helm: rbac.probeFrom=true)"]
+      SinkAX["sink-ax<br/>--sink=ax + lookout-ax-task ConfigMap +<br/>podidentity &amp; servicedns-ca volumes<br/>(Helm: sink.type=ax)"]
+    end
+
+    Prom["deploy/prometheus-operator/<br/>Optional ServiceMonitor scraping :9090<br/>(Helm: serviceMonitor.enabled=true)"]
+    Chart["deploy/chart/ (Helm parity)<br/>Renders deploy/base/, components/*,<br/>sink.type=webhook, and mode=mcp"]
+  end
+
+  subgraph Targets["Downstream Agent Sinks (from lookout watch)"]
+    direction LR
+    CADaemon["core-agent daemon<br/>POST /sessions &amp; /inject<br/>(--daemon-url)"]
+    Webhook["Webhook receiver<br/>POST /incidents &amp; /events<br/>(--sink-url)"]
+    AXPlane["Agent Substrate / AX<br/>AX API gRPC (--ax-server) +<br/>Substrate router mTLS (--ax-router-url)"]
+  end
+
+  subgraph MCPBundle["Standalone MCP Gateway Bundle (deploy/mcp/ | Helm mode=mcp)"]
+    direction LR
+    Caller["Human &amp; IDE Callers<br/>Gemini Enterprise | Claude Code | gemini-cli"]
+    GW["GKE External HTTPS Gateway<br/>Gateway + HTTPRoute +<br/>HealthCheckPolicy + GCPBackendPolicy<br/>+ deploy/mcp/domain/"]
+    MCPPod["lookout-mcp Deployment (lookout:vX.Y.Z-gke)<br/>Zero cluster RBAC on lookout-mcp SA:<br/>reads cluster &amp; GCP as each caller (--google-client-id)<br/>+ deploy/mcp/oauth/ (--oauth-issuer)"]
+    Caller -->|"HTTPS :443"| GW -->|"HTTP :8383"| MCPPod
+  end
+
+  K8sAPI["Kubernetes API Server &amp; Optional GKE Cloud APIs"]
+
+  Base --> Comps
+  Base -.-> Prom
+  Chart -.-> Base
+  Chart -.-> MCPPod
+  Base -->|"default"| CADaemon
+  Base -->|"--sink=webhook"| Webhook
+  SinkAX -->|"gRPC + router mTLS"| AXPlane
+  Base -->|"list / watch (read-only)"| K8sAPI
+  MCPPod -->|"per-caller token TLS"| K8sAPI
+```
+
 ## What each manifest is
 
 | Manifest | What it is |

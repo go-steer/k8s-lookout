@@ -21,6 +21,37 @@ results carry the exact payload the CLI prints: logfmt findings
 terminated by the `scanned=/findings=/elapsed=` summary line, passed
 through the same sanitizer.
 
+## Request & identity flow
+
+```mermaid
+flowchart TB
+  subgraph Callers["MCP Transports &amp; Caller Auth (internal/mcpserver)"]
+    direction LR
+    Stdio["stdio (default)<br/>Spawned child process<br/>JSON-RPC on stdin/stdout"]
+    Bearer["HTTP --listen (loopback or --allow-non-loopback)<br/>Shared bearer (--auth-token-file)<br/>+ --access-log"]
+    Google["HTTP --listen + --google-client-id<br/>Gemini Enterprise Google token<br/>--google-allow / --google-allow-write"]
+    OAuthAS["HTTP --listen + --oauth-issuer<br/>Embedded OAuth 2.1 AS (steward)<br/>--oauth-custody=sealed|vault, DCR / --oauth-clients-file"]
+    MTLS["mTLS --mtls-listen<br/>SPIFFE X509-SVID or CA client cert<br/>+ --workload-rules"]
+  end
+
+  subgraph Gate["Tool Selection, Cluster Resolution &amp; Identity"]
+    direction LR
+    Prof["Tool Surface (--profile / --tools)<br/>triage, audit, full; write gate on<br/>triage status, findings diff/ack, net probe-from"]
+    Fleet["Cluster Target (internal/fleet)<br/>Single cluster | --clusters | --clusters-from<br/>+ k8s_list_clusters"]
+    Ident["Execution Identity<br/>As lookout SA (stdio / bearer / workload default)<br/>As workload GSA (service_account impersonation)<br/>As caller's own Google token (Google / OAuth 2.1)"]
+  end
+
+  Checks["pkg/checks/* + pkg/emit.Writer<br/>Sanitize → Visibility (caller SSAR → hidden=&lt;n&gt;) →<br/>Policy → Exemptions (exempt=&lt;n&gt;) → Summary Line"]
+  Fit["fitResponse (--max-response-bytes=100000)<br/>Keep whole lines + rewrite summary response_truncated / response_hint<br/>+ record one logfmt line in --access-log"]
+
+  Stdio --> Prof
+  Bearer --> Prof
+  Google --> Prof
+  OAuthAS -->|"person token or client_credentials"| Prof
+  MTLS --> Prof
+  Prof --> Fleet --> Ident --> Checks --> Fit
+```
+
 ## Transports
 
 - **stdio (default)** — the transport a daemon uses when it spawns

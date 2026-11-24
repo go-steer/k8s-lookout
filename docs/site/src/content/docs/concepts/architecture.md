@@ -39,20 +39,55 @@ One-shot diagnostic commands an agent (or a human) runs mid-investigation
 or on a standing schedule:
 `triage`, `state`, `stab`, `perf`, `cloud`, `net`, `audit`, `findings`,
 plus the composed `scan`, `bundle`, and `health`. All of them share a
-single check implementation, consumed by three invocation surfaces:
+single check implementation in `pkg/checks` and one `pkg/emit.Writer`
+pipeline, consumed by three invocation surfaces:
 
-```
-             CLI (lookout <command>) ──┐
-             MCP  (lookout mcp) ───────┼──→ shared checks ──→ sanitizer + output envelope ──→ stdout / MCP response
-  enrichment (inside lookout watch) ───┘         │                                             / inject attachment
-                                                 └──→ topology graph (radius, edges, changes, --at)
+```mermaid
+flowchart TB
+  subgraph Surfaces["Invocation Surfaces"]
+    direction LR
+    CLI["CLI (cmd/lookout)<br/>lookout &lt;group&gt; &lt;cmd&gt;<br/>--kubeconfig / --context / --contexts<br/>(or in-cluster SA autodetect)"]
+    MCP["MCP (internal/mcpserver — lookout mcp)<br/>stdio | loopback HTTP (--listen) |<br/>shared bearer (--auth-token-file) |<br/>per-caller Google OAuth (--google-client-id) |<br/>embedded OAuth 2.1 AS (--oauth-issuer) |<br/>workload mTLS (--mtls-listen + --workload-rules)"]
+    Enrich["In-Process Enrichment (internal/watch)<br/>--enrich=critical|warning<br/>live pkg/graph + scoped-list fallback"]
+  end
+
+  subgraph Core["Shared Check Execution (pkg/checks)"]
+    direction LR
+    Checks["pkg/checks/*<br/>scan, health, bundle, triage, state,<br/>stab, perf, cloud, net, audit, findings"]
+    Deps["Cluster, History &amp; Cloud Seams<br/>pkg/kube (paged + trimmed reads)<br/>pkg/graph + pkg/store (--at, changes, triage_status)<br/>pkg/cloud.Provider (-gke build tag; *.unavailable when absent)"]
+  end
+
+  subgraph Emit["Output Pipeline (pkg/emit.Writer + MCP Fitting)"]
+    direction TB
+    Sanitize["1. Sanitize (SanitizeFinding)<br/>Mask secrets, tokens, keys &amp; PEM blocks on every surface"]
+    Vis["2. Visibility (WithVisibility)<br/>Per-caller SSAR filter on store/history rows → hidden=&lt;n&gt;"]
+    Stamp["3. Stamp, Fold &amp; Validate<br/>check=&lt;cmd&gt; composition stamp + autopilot_idle_folded"]
+    Pol["4. Policy (WithPolicy)<br/>Check enablement + severity override → policy=&lt;name&gt; suppressed=&lt;n&gt;"]
+    Ex["5. Exemptions (WithExemptions — pkg/exempt)<br/>Annotate exempt=true + exempt_reason + exempt_expires (never drops) → exempt=&lt;n&gt;"]
+    Sum["6. Encode &amp; Summary Line (Writer.Summary)<br/>--format=logfmt|json|findings + mandatory scanned=&lt;n&gt; findings=&lt;n&gt; elapsed=&lt;d&gt;"]
+    Fit["7. MCP Response Fitting (fitResponse, --max-response-bytes)<br/>Drop whole lines (tail, or head when NewestLast) + rewrite summary response_* notes"]
+  end
+
+  Out["Output Destinations<br/>CLI stdout (exit 0) | MCP tool result (+ --access-log) | Sentinel inject attachment"]
+
+  CLI --> Checks
+  MCP --> Checks
+  Enrich --> Checks
+  Checks <--> Deps
+  Checks --> Sanitize --> Vis --> Stamp --> Pol --> Ex --> Sum
+  Sum -->|"CLI &amp; enrichment"| Out
+  Sum -->|"lookout mcp"| Fit --> Out
 ```
 
-- **CLI** — for deployments where the agent has a shell.
-- **MCP** — `lookout mcp` serves every registered command 1:1 as an MCP tool
-  (stdio or loopback HTTP), for distroless daemons that cannot shell out.
-- **In-process enrichment** — the sentinel calls the same checks directly to
-  pre-warm incident sessions; no fork/exec, shared informer cache.
+- **CLI** — for deployments where the agent or operator has a shell.
+- **MCP** — [`lookout mcp`](/getting-started/mcp/) serves every registered
+  command 1:1 as an MCP tool (selectable via `--profile` and `--tools`)
+  over `stdio`, loopback HTTP, authenticated off-host HTTP (shared bearer
+  token, per-caller Google OAuth, or `lookout`'s embedded OAuth 2.1
+  authorization server), and workload mTLS (`--mtls-listen`).
+- **In-process enrichment** — the sentinel calls the same `bundle` check
+  directly to pre-warm incident sessions; no fork/exec, shared informer
+  cache.
 
 Whatever the surface, the output contract is identical: one finding per line
 (logfmt by default, `--format=json` for JSON-per-line, or
@@ -64,11 +99,66 @@ stream never corrupts a context window; exit `2` is a usage error.
 ## The watch-path
 
 `lookout watch` is a resident per-cluster **sentinel**: pluggable signal
-sources feeding one pipeline, ending in injects to `core-agent` sessions.
+sources feeding one pipeline (`internal/watch`), ending in injects to an
+agent sink (`core-agent`, `webhook`, or `ax`) and closing the loop on
+recovery.
 
+```mermaid
+flowchart TB
+  subgraph Srcs["Signal Sources (pkg/sources/*)"]
+    direction LR
+    Auto["Auto-Probed Portable Set (--sources=auto)<br/>k8s-events, object-state, rollout, workload,<br/>autoscaling, saturation, degradation, expiry,<br/>capacity, ingress, gateway"]
+    Explicit["Explicit-Only (--sources=...)<br/>quota (project tier),<br/>notifications (Pub/Sub),<br/>token-burn (daemon cost stack)"]
+  end
+
+  Classify["1. Classify (classifySignal)<br/>CanonicalKey + PullClassMemo + engine.Fingerprint<br/>RoutingPolicy (--severity) → triage_status override → --alert-excludes"]
+  Filter["2. Filter (pkg/engine.Filter)<br/>Namespace/reason gates, count debounces,<br/>FailedScheduling scale-up verdict gate, --settle hold"]
+  Dedup["3. Dedup (pkg/engine.DedupCache, --dedup-window)<br/>Suppress duplicates | doubling-schedule repeat followups<br/>Persisted via --dedup-persist"]
+
+  subgraph Route["4. Per-Incident Waterfall: Info → Storm → Warning / Critical (--mode=per-incident)"]
+    direction TB
+    Info["4a. severity=info (RouteStore)<br/>Stored to occurrences only"]
+    Storm["4b. Storm Correlation (engine.StormCorrelator)<br/>--storm=auto|on via pkg/graph blast-radius<br/>+ --storm-mine → kind=storm session"]
+    Board["4c. severity=warning (RouteWatchboard)<br/>Ancestor reattach (family.member) or<br/>watchboard.digest (--watchboard-batch / --watchboard-flush / --watchboard-rotate)"]
+    Crit["4d. severity=critical<br/>Sibling fold + dedicated incident session"]
+  end
+
+  EnrichW["5. In-Process Enrichment<br/>pkg/checks/bundle (--enrich=critical|warning)<br/>for new storm &amp; per-incident opens"]
+  Guard["6. Wire Fit &amp; Sanitization<br/>FitTo (--inject-max-bytes) + MaskingSink<br/>on every outbound inject"]
+
+  subgraph Sinks["7. Agent Sinks (pkg/inject.Sink: OpenIncident + Append)"]
+    direction LR
+    CA["core-agent (--sink=core-agent)<br/>POST /sessions + /sessions/{id}/inject<br/>(--daemon-url)"]
+    WH["webhook (--sink=webhook)<br/>POST /incidents + /incidents/{id}/events<br/>(--sink-url, schema-v1 body)"]
+    AX["ax (--sink=ax, internal/axsink)<br/>gRPC Task (--ax-server, --ax-task-template)<br/>+ router mTLS (--ax-router-url)"]
+  end
+
+  Recov["8. Recovery Loop (engine.RecoveryTracker, --recovery-stable-for)<br/>Per-source ClearanceObserver + Pod/ReplicaSet/Deployment informers<br/>Emits resolved / resolved.reverted → Guard → Append &amp; flips triage_status"]
+
+  DB[("SQLite Store (pkg/store, --store)<br/>occurrences, graph_snapshots, graph_changes,<br/>triage_status, memory_facts, sink_sessions")]
+
+  Auto --> Classify
+  Explicit --> Classify
+  Classify --> Filter --> Dedup
+  Dedup -->|"DedupNew (info)"| Info
+  Dedup -->|"DedupNew (warning / critical)"| Storm
+  Storm -->|"StormNone (warning)"| Board
+  Storm -->|"StormNone (critical)"| Crit
+  Dedup -->|"DedupRepeat"| Guard
+  Info --> DB
+  Storm -->|"StormFormed"| EnrichW
+  Storm -->|"StormAttached"| Guard
+  Crit --> EnrichW
+  Board --> Guard
+  EnrichW --> Guard --> Sinks
+  Sinks --> Recov
+  Recov -->|"DispatchSignal (resolved)"| Guard
+  Recov -->|"ResolveTriageStatus"| DB
+  DB -.->|"open triage_status"| Classify
+  AX <-->|"sink_sessions"| DB
 ```
-sources ──→ filter ──→ dedup ──→ storm correlation ──→ severity routing ──→ enrichment ──→ inject ──→ core-agent sessions
-```
+
+*(In `--mode=shared`, watchboard and per-incident enrichment are disabled and every post-dedup signal appends directly to `--target-session`.)*
 
 The sources (enabled per deployment via `--sources`) cover reactive and
 leading classes: `k8s-events` (the reactive baseline), `object-state`
