@@ -114,7 +114,7 @@ func TestNameClusters(t *testing.T) {
 	}
 }
 
-func newTestClusters(src *fakeFleet, perCaller bool) (*Clusters, *time.Time) {
+func newTestClusters(src fleet.Source, perCaller bool) (*Clusters, *time.Time) {
 	c := NewClusters(src, perCaller, time.Hour)
 	c.access = nil // no API server behind the fakes; tests that need access set it
 	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)

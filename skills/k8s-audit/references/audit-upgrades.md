@@ -37,6 +37,7 @@ MCP tool: `k8s_audit_upgrades` (MCP profile: `audit`)
 | `--context` | — | kubeconfig context to read, instead of its current-context. Selects a cluster for THIS invocation only — nothing is written back — so concurrent invocations can target different clusters. Reported as context=<name> in the summary line |
 | `--contexts` | — | comma-separated kubeconfig contexts to fan out across, or '*' for every context in the selected kubeconfig(s) (mutually exclusive with --context); each finding is stamped with cluster=<label> and the summary reports clusters=<n> |
 | `--concurrency` | 4 | maximum concurrent cluster executions when fanning out with --contexts or --kubeconfig-dir |
+| `--google-auth` | — | how Google Cloud and GKE DNS requests authenticate: auto (default: honors LOOKOUT_GOOGLE_AUTH, CORE_AGENT_GOOGLE_AUTH, MAST_GOOGLE_AUTH), adc, or injected (static placeholder bearer token, zero GCE metadata lookups) |
 | `--exemptions` | — | path to a git-reviewed exemption file (YAML); covered findings are ANNOTATED with their reason and expiry and counted as exempt=<n> in the summary, never dropped |
 
 ## Finding kinds

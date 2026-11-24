@@ -164,20 +164,41 @@ func New(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {
 		// A cluster named per call on a multi-cluster endpoint (#700):
 		// its own identity, over the environment's and the metadata
 		// server's, for the reason above. A kubeconfig-fleet target
-		// knows no project, which leaves cluster-scoped capabilities
-		// to degrade explicitly.
+		// whose context name carries a GKE cluster reference resolves
+		// that identity; any other kubeconfig target knows no project,
+		// leaving cluster-scoped capabilities to degrade explicitly.
+		proj, loc, clus := t.Project, t.Location, t.Name
+		if proj == "" && loc == "" {
+			if id, ok := cloud.ParseClusterRef(t.Name); ok {
+				proj, loc, clus = id.Project, id.Location, id.Cluster
+			}
+		}
 		if cfg.Project == "" {
-			p.project = t.Project
+			p.project = proj
 		}
 		if cfg.Location == "" {
-			p.location = t.Location
+			p.location = loc
 		}
 		if cfg.Cluster == "" {
-			p.cluster = t.Name
+			p.cluster = clus
 		}
 		return p, nil
 	}
 	if !sel.IsZero() {
+		p.fillFromKubeconfig(ctx)
+		return p, nil
+	}
+	if cfg.SkipMetadata {
+		// Fleet discovery / lookup resolvers pin Project and Location explicitly
+		// (Location == "" means all locations "-"); never consult GCE instance
+		// metadata or borrow a local kubeconfig's location/cluster.
+		return p, nil
+	}
+	if cloud.IsInjectedGoogleAuth(ctx) || cloud.HasCredentialProxy() {
+		// Never query GCE instance metadata inside an injected-auth or
+		// credential-proxy task (#858): there is no metadata server to reach,
+		// and if a host metadata server were reachable it would describe a
+		// worker VM rather than any target cluster.
 		p.fillFromKubeconfig(ctx)
 		return p, nil
 	}
@@ -258,9 +279,15 @@ func kubeconfigGKEIdentity(ctx context.Context) (project, location, cluster stri
 	if proj, loc, clus, ok := parseGKEContextName(ctxName); ok {
 		return proj, loc, clus
 	}
+	if id, ok := cloud.ParseClusterRef(ctxName); ok {
+		return id.Project, id.Location, id.Cluster
+	}
 	if kctx, ok := raw.Contexts[ctxName]; ok && kctx != nil {
 		if proj, loc, clus, ok := parseGKEContextName(kctx.Cluster); ok {
 			return proj, loc, clus
+		}
+		if id, ok := cloud.ParseClusterRef(kctx.Cluster); ok {
+			return id.Project, id.Location, id.Cluster
 		}
 	}
 	return "", "", ""

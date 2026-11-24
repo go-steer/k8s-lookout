@@ -42,6 +42,11 @@ type Config struct {
 	Location string
 	Cluster  string
 
+	// SkipMetadata instructs the provider not to query the instance metadata
+	// server during construction (used when constructing a Fleet resolver that
+	// only discovers remote clusters, so startup stays completely offline).
+	SkipMetadata bool
+
 	// NotificationsSubscription names the provider-side subscription
 	// the notifications capability reads (GKE: a Pub/Sub subscription
 	// on the cluster's notificationConfig topic — either the full

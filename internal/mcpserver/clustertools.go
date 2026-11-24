@@ -40,6 +40,7 @@ import (
 
 	"github.com/go-steer/k8s-lookout/internal/fleet"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
@@ -66,7 +67,8 @@ func toolSchema(c checks.Command, multi bool) *jsonschema.Schema {
 	s.Properties[clusterProperty] = &jsonschema.Schema{
 		Type: "string",
 		Description: "the cluster to read, as k8s_list_clusters names it: its name, " +
-			"name@project when names repeat across projects, or project/location/name. " +
+			"name@project when names repeat across projects, project/location/name, " +
+			"projects/<project>/locations/<location>/clusters/<name>, or gke_<project>_<location>_<name>. " +
 			"Leave it out when the user did not name one: the server picks their default " +
 			"or only readable cluster, or answers with the clusters to choose from. Never invent a name",
 	}
@@ -144,6 +146,12 @@ var listClustersCommand = checks.Command{Name: "list clusters", MCPName: listClu
 
 func listClustersHandler(cfg config, sem chan struct{}) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var cancelServe context.CancelFunc
+		ctx, cancelServe = bindServeContext(ctx, cfg.server)
+		defer cancelServe()
+		if cfg.googleAuth != "" {
+			ctx = cloud.WithGoogleAuth(ctx, cfg.googleAuth)
+		}
 		start := cfg.log.now()
 		remote := remoteAddrFromContext(ctx)
 		caller := ""

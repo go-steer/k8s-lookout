@@ -39,12 +39,14 @@ package gke
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	container "google.golang.org/api/container/v1"
+	"google.golang.org/api/googleapi"
 	"k8s.io/client-go/rest"
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
@@ -71,8 +73,11 @@ type fleetLister interface {
 	ListClusters(ctx context.Context, parent string) ([]*container.Cluster, error)
 }
 
-// The GKE provider implements the optional cloud.Fleet surface.
-var _ cloud.Fleet = (*Provider)(nil)
+// The GKE provider implements the optional cloud.Fleet and cloud.ClusterLookup surfaces.
+var (
+	_ cloud.Fleet         = (*Provider)(nil)
+	_ cloud.ClusterLookup = (*Provider)(nil)
+)
 
 // DiscoverClusters implements cloud.Fleet: every cluster in the
 // provider's project (all locations when none is pinned).
@@ -80,12 +85,45 @@ func (p *Provider) DiscoverClusters(ctx context.Context) ([]cloud.ClusterRef, er
 	return discoverClusters(ctx, p.project, p.location, newFleetLister())
 }
 
+// LookupCluster implements cloud.ClusterLookup: resolve one fully qualified
+// cluster record via clusters.get without listing an entire project.
+func (p *Provider) LookupCluster(ctx context.Context, project, location, name string) (cloud.ClusterRef, error) {
+	if !cloud.ValidClusterID(project, location, name) {
+		return cloud.ClusterRef{}, fmt.Errorf("invalid GKE cluster reference %q/%q/%q", project, location, name)
+	}
+	c, err := newGKEClusterClient(project, location, name).GetCluster(ctx)
+	if err != nil {
+		var gerr *googleapi.Error
+		if errors.As(err, &gerr) && gerr.Code == http.StatusNotFound {
+			return cloud.ClusterRef{}, fmt.Errorf("looking up cluster projects/%s/locations/%s/clusters/%s: %w: %w", project, location, name, cloud.ErrClusterNotFound, err)
+		}
+		return cloud.ClusterRef{}, fmt.Errorf("looking up cluster projects/%s/locations/%s/clusters/%s: %w", project, location, name, err)
+	}
+	if c == nil {
+		return cloud.ClusterRef{}, fmt.Errorf("cluster projects/%s/locations/%s/clusters/%s returned an empty record", project, location, name)
+	}
+	loc := firstNonEmpty(c.Location, location)
+	return cloud.ClusterRef{
+		Name:     firstNonEmpty(c.Name, name),
+		Project:  project,
+		Location: loc,
+		Region:   locationRegion(loc),
+		Endpoint: dnsEndpoint(c),
+	}, nil
+}
+
 // RESTConfig implements cloud.Fleet: a config for the cluster's DNS
-// endpoint, authenticated with ADC, or with the caller's token when the
-// invocation runs as its caller (kube.WithCallerToken, #699).
+// endpoint, authenticated with ADC, with the injected placeholder bearer
+// token (#858), or with the caller's token when the invocation runs as
+// its caller (kube.WithCallerToken, #699).
 func (p *Provider) RESTConfig(ctx context.Context, ref cloud.ClusterRef) (*rest.Config, error) {
 	if ts, ok := kube.CallerTokenFrom(ctx); ok {
 		return restConfig(ctx, ref, func(context.Context, ...string) (oauth2.TokenSource, error) { return ts, nil })
+	}
+	if cloud.IsInjectedGoogleAuth(ctx) {
+		return restConfig(ctx, ref, func(context.Context, ...string) (oauth2.TokenSource, error) {
+			return cloud.InjectedTokenSource(), nil
+		})
 	}
 	return restConfig(ctx, ref, google.DefaultTokenSource)
 }

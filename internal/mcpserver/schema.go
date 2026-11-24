@@ -66,6 +66,7 @@ var serverScopedFlags = map[string]bool{
 	"context":        true,
 	"contexts":       true,
 	"concurrency":    true,
+	"google-auth":    true,
 	"exemptions":     true,
 	"store":          true,
 	"report":         true,

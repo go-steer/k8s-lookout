@@ -66,6 +66,10 @@ func newPQMetadataClient(p *Provider) *pqMetadataClient {
 	return &pqMetadataClient{
 		project: p.project,
 		client: lazyClient(func(ctx context.Context) (*cloudquotas.Client, error) {
+			if err := grpcCredentialProxyErr(ctx); err != nil {
+				return nil, err
+			}
+			ctx = withGRPCClient(ctx)
 			c, err := cloudquotas.NewClient(ctx, clientOptions(ctx)...)
 			if err != nil {
 				return nil, err

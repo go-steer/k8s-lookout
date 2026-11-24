@@ -599,6 +599,30 @@ func (r workloadRule) allowsCluster(e clusterEntry) bool {
 		if c == "*" || c == e.canonical || c == e.name || c == e.ref.Name {
 			return true
 		}
+		if id, ok := cloud.ParseClusterRef(c); ok && e.gkeID != nil && id == *e.gkeID {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *workloadCall) allowsClusterID(id cloud.ClusterID) bool {
+	if c == nil {
+		return true
+	}
+	for _, r := range c.rules {
+		for _, cl := range r.clusters {
+			// Only "*" or a canonical GKE cluster identity may authorize dynamic
+			// out-of-scope cluster resolution; a bare short name like "prod" grants
+			// only the in-scope cluster of that name, never every "prod" cluster in
+			// other GCP projects.
+			if cl == "*" || cl == id.Triple() || cl == id.ResourcePath() || cl == id.ContextName() {
+				return true
+			}
+			if rid, ok := cloud.ParseClusterRef(cl); ok && rid == id {
+				return true
+			}
+		}
 	}
 	return false
 }

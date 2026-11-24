@@ -67,6 +67,11 @@ const (
 type Options struct {
 	// InCluster forces in-cluster service account credentials.
 	InCluster bool
+	// NoAutoInCluster disables KUBERNETES_SERVICE_HOST auto-detection when
+	// InCluster is false (set when injected Google auth or CREDENTIAL_PROXY_URL
+	// is active so an agent task or CronJob pod is not mistaken for a target
+	// workload cluster).
+	NoAutoInCluster bool
 	// Kubeconfig is an explicit kubeconfig path. Used outside a pod.
 	Kubeconfig string
 	// Context names a context in the kubeconfig to use instead of its
@@ -227,11 +232,11 @@ func BuildConfig(opts Options) (*rest.Config, error) {
 		// cluster, and QPS, burst and caller credentials are this call's.
 		cfg = rest.CopyConfig(opts.Target.Config)
 	case opts.Kubeconfig != "":
-		cfg, err = loadKubeconfig(&clientcmd.ClientConfigLoadingRules{ExplicitPath: opts.Kubeconfig}, opts.Context)
+		cfg, err = loadKubeconfig(&clientcmd.ClientConfigLoadingRules{ExplicitPath: opts.Kubeconfig}, resolveContextAlias(&clientcmd.ClientConfigLoadingRules{ExplicitPath: opts.Kubeconfig}, opts.Context))
 		if err != nil {
 			return nil, fmt.Errorf("kubeconfig %s: %w", opts.Kubeconfig, err)
 		}
-	case opts.InCluster || os.Getenv("KUBERNETES_SERVICE_HOST") != "":
+	case opts.InCluster || (!opts.NoAutoInCluster && os.Getenv("KUBERNETES_SERVICE_HOST") != ""):
 		if opts.Context != "" {
 			return nil, fmt.Errorf("--context=%s is meaningless with in-cluster credentials: there is no kubeconfig to select a context from. Pass --kubeconfig=<path> as well, or drop --context", opts.Context)
 		}
@@ -243,7 +248,8 @@ func BuildConfig(opts Options) (*rest.Config, error) {
 		// Fallback to default kubeconfig search (KUBECONFIG env,
 		// then $HOME/.kube/config). Fine for local dev; a real
 		// deployment always sets --in-cluster or --kubeconfig.
-		cfg, err = loadKubeconfig(clientcmd.NewDefaultClientConfigLoadingRules(), opts.Context)
+		rules := clientcmd.NewDefaultClientConfigLoadingRules()
+		cfg, err = loadKubeconfig(rules, resolveContextAlias(rules, opts.Context))
 		if err != nil {
 			return nil, fmt.Errorf("default kubeconfig: %w", err)
 		}
