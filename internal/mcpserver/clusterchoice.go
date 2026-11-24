@@ -37,6 +37,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -44,9 +45,11 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	authv1 "k8s.io/api/authorization/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
 
@@ -71,7 +74,10 @@ type accessFunc func(ctx context.Context, cfg *rest.Config) string
 
 // reviewAccess asks the API server, as the identity in cfg, whether it
 // may list pods cluster-wide: one SelfSubjectAccessReview, which needs no
-// grant of its own.
+// grant of its own. When a GET-only credential proxy (CREDENTIAL_PROXY_URL)
+// refuses POST SelfSubjectAccessReview with 405 Method Not Allowed or 403
+// Forbidden (#858), it falls back to a 1-item pod-list GET probe so RBAC
+// classification still works without weakening access reporting.
 func reviewAccess(ctx context.Context, cfg *rest.Config) string {
 	client, err := kube.BuildClientFromConfig(cfg)
 	if err != nil {
@@ -82,13 +88,39 @@ func reviewAccess(ctx context.Context, cfg *rest.Config) string {
 			ResourceAttributes: &authv1.ResourceAttributes{Verb: "list", Resource: "pods"},
 		},
 	}, metav1.CreateOptions{})
-	if err != nil {
-		return accessUnreachable
+	if err == nil {
+		if res.Status.Allowed {
+			return accessRead
+		}
+		return accessLimited
 	}
-	if res.Status.Allowed {
-		return accessRead
+	if isSSARRefused(err) {
+		_, listErr := client.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{Limit: 1})
+		switch {
+		case listErr == nil:
+			return accessRead
+		case apierrors.IsForbidden(listErr) && !apierrors.IsUnexpectedServerError(listErr):
+			// Only a structured Kubernetes metav1.Status 403 proves the request
+			// reached kube-apiserver and failed RBAC; plain-text or Google RPC
+			// 403 responses from VPC-SC perimeters, *.gke.goog IAM gates, or
+			// credential proxy ACLs carry CauseTypeUnexpectedServerResponse and
+			// remain unreachable.
+			return accessLimited
+		}
 	}
-	return accessLimited
+	return accessUnreachable
+}
+
+func isSSARRefused(err error) bool {
+	if apierrors.IsMethodNotSupported(err) || isAPIStatusCode(err, http.StatusMethodNotAllowed) {
+		return true
+	}
+	return cloud.HasCredentialProxy() && (apierrors.IsForbidden(err) || isAPIStatusCode(err, http.StatusForbidden))
+}
+
+func isAPIStatusCode(err error, code int32) bool {
+	var st apierrors.APIStatus
+	return errors.As(err, &st) && st.Status().Code == code
 }
 
 // checkAccess records each cluster's access in a fresh set, a few at a
@@ -117,6 +149,10 @@ func (c *Clusters) checkAccess(ctx context.Context, set *clusterSet) {
 		}
 		wg.Wait()
 	}
+	c.sortAndIndexSet(set)
+}
+
+func (c *Clusters) sortAndIndexSet(set *clusterSet) {
 	slices.SortStableFunc(set.entries, func(a, b clusterEntry) int {
 		if d := accessRank(a.access) - accessRank(b.access); d != 0 {
 			return d
@@ -126,11 +162,7 @@ func (c *Clusters) checkAccess(ctx context.Context, set *clusterSet) {
 		}
 		return strings.Compare(a.name, b.name)
 	})
-	clear(set.byName)
-	for i, e := range set.entries {
-		set.byName[e.name] = i
-		set.byName[e.canonical] = i
-	}
+	rebuildByName(set)
 }
 
 func accessRank(a string) int {
@@ -146,8 +178,25 @@ func accessRank(a string) int {
 	}
 }
 
+func (e clusterEntry) gkeProject() string {
+	if e.ref.Project != "" {
+		return e.ref.Project
+	}
+	if e.gkeID != nil {
+		return e.gkeID.Project
+	}
+	return ""
+}
+
+func (e clusterEntry) gkeClusterName() string {
+	if e.gkeID != nil {
+		return e.gkeID.Cluster
+	}
+	return e.ref.Name
+}
+
 func (c *Clusters) projectRank(e clusterEntry) int {
-	if c.defaultProject != "" && e.ref.Project == c.defaultProject {
+	if c.defaultProject != "" && e.gkeProject() == c.defaultProject {
 		return 0
 	}
 	return 1
@@ -222,8 +271,13 @@ func (c *Clusters) Choose(ctx context.Context, caller, name string) (clusterEntr
 		return clusterEntry{}, err
 	}
 	if c.defaultCluster != "" {
-		if i, ok := set.byName[c.defaultCluster]; ok && set.entries[i].eligible() {
-			return set.entries[i], nil
+		if e, ok := c.lookupInSet(set, c.defaultCluster); ok && e.eligible() {
+			return e, nil
+		}
+	}
+	if len(set.entries) == 0 {
+		return clusterEntry{}, &choiceError{
+			msg: "no clusters are in the default discovery scope and this call names none; pass cluster as <project>/<location>/<cluster> or projects/<project>/locations/<location>/clusters/<cluster>",
 		}
 	}
 	var readable, limited []clusterEntry
@@ -243,7 +297,7 @@ func (c *Clusters) Choose(ctx context.Context, caller, name string) (clusterEntr
 	}
 	var inProject []clusterEntry
 	for _, e := range tier {
-		if c.defaultProject != "" && e.ref.Project == c.defaultProject {
+		if c.defaultProject != "" && e.gkeProject() == c.defaultProject {
 			inProject = append(inProject, e)
 		}
 	}
@@ -273,7 +327,7 @@ func (c *Clusters) inDefaultProject(set *clusterSet, name string) (clusterEntry,
 	}
 	var match []clusterEntry
 	for _, e := range set.entries {
-		if e.ref.Name == name && e.ref.Project == c.defaultProject {
+		if e.gkeClusterName() == name && e.gkeProject() == c.defaultProject {
 			match = append(match, e)
 		}
 	}

@@ -15,6 +15,7 @@
 package kube
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -25,6 +26,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 )
 
 // ContextRef describes one context in a kubeconfig: enough to name a
@@ -125,6 +128,199 @@ type FleetTarget struct {
 	// <filename>:<Context> when two kubeconfig files share a context
 	// name.
 	Label string
+	// Target is set when Context named a kubeconfig-free GKE cluster
+	// reference resolved via CREDENTIAL_PROXY_URL or cloud.Fleet (#858).
+	Target *Target
+}
+
+// resolveContextAlias maps a GKE cluster reference ("projects/<p>/locations/<l>/clusters/<c>",
+// "<p>/<l>/<c>", or "gke_<p>_<l>_<c>") or bare cluster name onto an existing
+// context name in loader when raw is not itself a defined context name. If the
+// kubeconfig cannot be loaded or no unambiguous match exists, raw is returned
+// verbatim so clientcmd produces its standard diagnostic.
+func resolveContextAlias(loader clientcmd.ClientConfigLoader, raw string) string {
+	if raw == "" {
+		return ""
+	}
+	cfg, err := loader.Load()
+	if err != nil || cfg == nil {
+		return raw
+	}
+	if matched, ok := matchKubeconfigContext(cfg, raw); ok {
+		return matched
+	}
+	return raw
+}
+
+// matchKubeconfigContext resolves raw against cfg.Contexts: exact context name
+// first, then canonical GKE equivalents (gke_<p>_<l>_<c>, <p>/<l>/<c>,
+// projects/<p>/locations/<l>/clusters/<c>, Context.Cluster match, or an
+// un-prefixed bare context matching id.Cluster when no conflicting GKE project
+// exists), or a unique gke_*_*_<raw> match when raw is a bare cluster name.
+func matchKubeconfigContext(cfg *clientcmdapi.Config, raw string) (string, bool) {
+	v := strings.TrimSpace(raw)
+	if v == "" || cfg == nil || len(cfg.Contexts) == 0 {
+		return "", false
+	}
+	if _, ok := cfg.Contexts[v]; ok {
+		return v, true
+	}
+	if id, ok := cloud.ParseClusterRef(v); ok {
+		for _, cand := range []string{id.ContextName(), id.Triple(), id.ResourcePath()} {
+			if _, exists := cfg.Contexts[cand]; exists {
+				return cand, true
+			}
+		}
+		var clusterEntryMatches []string
+		for _, name := range sortedContextNames(cfg) {
+			kctx := cfg.Contexts[name]
+			if kctx == nil {
+				continue
+			}
+			if cid, cok := cloud.ParseClusterRef(kctx.Cluster); cok && cid == id {
+				clusterEntryMatches = append(clusterEntryMatches, name)
+			}
+		}
+		if len(clusterEntryMatches) == 1 {
+			return clusterEntryMatches[0], true
+		}
+		// Plain context named id.Cluster with no conflicting GKE project.
+		if kctx, exists := cfg.Contexts[id.Cluster]; exists && kctx != nil {
+			if _, hasGKE := cloud.ParseClusterRef(id.Cluster); !hasGKE {
+				if cid, cok := cloud.ParseClusterRef(kctx.Cluster); !cok || cid == id {
+					return id.Cluster, true
+				}
+			}
+		}
+		return "", false
+	}
+	if strings.ContainsAny(v, "/@=") {
+		return "", false
+	}
+	var bareMatches []string
+	for _, name := range sortedContextNames(cfg) {
+		kctx := cfg.Contexts[name]
+		if cid, ok := cloud.ParseClusterRef(name); ok && cid.Cluster == v {
+			bareMatches = append(bareMatches, name)
+			continue
+		}
+		if kctx != nil {
+			if cid, ok := cloud.ParseClusterRef(kctx.Cluster); ok && cid.Cluster == v {
+				bareMatches = append(bareMatches, name)
+			}
+		}
+	}
+	if len(bareMatches) == 1 {
+		return bareMatches[0], true
+	}
+	return "", false
+}
+
+// ResolveClusterTarget resolves a canonical GKE ClusterID without a kubeconfig
+// through CREDENTIAL_PROXY_URL (when set) or a compiled-in cloud.Fleet
+// provider (using ADC or injected Google auth).
+func ResolveClusterTarget(ctx context.Context, id cloud.ClusterID) (Target, error) {
+	if !cloud.ValidClusterID(id.Project, id.Location, id.Cluster) {
+		return Target{}, fmt.Errorf("invalid GKE cluster reference %q", id.Triple())
+	}
+	if cloud.HasCredentialProxy() {
+		proxy, err := cloud.CredentialProxyFromEnv()
+		if err != nil {
+			return Target{}, err
+		}
+		host, err := proxy.K8sHost(id)
+		if err != nil {
+			return Target{}, err
+		}
+		cfg := &rest.Config{Host: host}
+		if proxy.TokenFile != "" {
+			cfg.Wrap(proxy.WrapRoundTripper)
+		}
+		return Target{
+			Name:     id.Cluster,
+			Project:  id.Project,
+			Location: id.Location,
+			Config:   cfg,
+		}, nil
+	}
+	provider, err := cloud.New(ctx, cloud.Config{
+		Project:      id.Project,
+		Location:     id.Location,
+		Cluster:      id.Cluster,
+		SkipMetadata: true,
+	})
+	if err != nil {
+		return Target{}, err
+	}
+	fl, ok := provider.(cloud.Fleet)
+	if !ok {
+		return Target{}, fmt.Errorf("cluster %q: provider %q cannot resolve GKE cluster credentials without a kubeconfig (build with -tags gke or pass --kubeconfig)", id.Triple(), provider.Name())
+	}
+	var ref cloud.ClusterRef
+	if lookup, ok := provider.(cloud.ClusterLookup); ok {
+		ref, err = lookup.LookupCluster(ctx, id.Project, id.Location, id.Cluster)
+		if err != nil {
+			return Target{}, err
+		}
+	} else {
+		refs, err := fl.DiscoverClusters(ctx)
+		if err != nil {
+			return Target{}, err
+		}
+		found := false
+		for _, r := range refs {
+			if r.Name == id.Cluster && (r.Location == "" || r.Location == id.Location) {
+				ref = r
+				found = true
+				break
+			}
+		}
+		if !found {
+			return Target{}, fmt.Errorf("cluster %q not found in %s/%s", id.Cluster, id.Project, id.Location)
+		}
+	}
+	cfg, err := fl.RESTConfig(context.WithoutCancel(ctx), ref)
+	if err != nil {
+		return Target{}, err
+	}
+	return Target{
+		Name:     id.Cluster,
+		Project:  id.Project,
+		Location: id.Location,
+		Config:   cfg,
+	}, nil
+}
+
+// ResolveContextSelection resolves a single --kubeconfig / --context pair for
+// a read-path invocation: if a kubeconfig defines the context (directly or via
+// GKE naming normalization), Selection uses that kubeconfig context; otherwise,
+// when kubeconfig is unset and rawContext is a canonical GKE cluster reference,
+// it resolves a kubeconfig-free Target via CREDENTIAL_PROXY_URL or cloud.Fleet.
+func ResolveContextSelection(ctx context.Context, kubeconfig, rawContext string) (Selection, bool, error) {
+	if rawContext == "" {
+		return Selection{Kubeconfig: kubeconfig}, false, nil
+	}
+	cfg, err := contextLoadingRules(kubeconfig).Load()
+	if err == nil && cfg != nil {
+		if matched, ok := matchKubeconfigContext(cfg, rawContext); ok {
+			return Selection{Kubeconfig: kubeconfig, Context: matched}, false, nil
+		}
+	}
+	if kubeconfig == "" {
+		if id, ok := cloud.ParseClusterRef(rawContext); ok {
+			hasExplicitKC := cfg != nil && len(cfg.Contexts) > 0
+			isExplicitResourcePath := strings.HasPrefix(strings.TrimSpace(rawContext), "projects/") ||
+				strings.HasPrefix(strings.TrimSpace(rawContext), "//container.googleapis.com/")
+			if !hasExplicitKC || isExplicitResourcePath || cloud.HasCredentialProxy() || cloud.IsInjectedGoogleAuth(ctx) {
+				t, terr := ResolveClusterTarget(ctx, id)
+				if terr != nil {
+					return Selection{}, true, terr
+				}
+				return Selection{Target: &t}, true, nil
+			}
+		}
+	}
+	return Selection{Kubeconfig: kubeconfig, Context: rawContext}, false, nil
 }
 
 // ParseContextsList parses a --contexts value: a comma-separated list
@@ -163,6 +359,13 @@ func ParseContextsList(raw string) (contexts []string, all bool, err error) {
 // a read-path fleet fan-out from --kubeconfig / --kubeconfig-dir and
 // --contexts.
 func ResolveFleetTargets(kubeconfig, kubeconfigDir, contextsRaw string) ([]FleetTarget, error) {
+	return ResolveFleetTargetsContext(context.Background(), kubeconfig, kubeconfigDir, contextsRaw)
+}
+
+// ResolveFleetTargetsContext is ResolveFleetTargets with an invocation context
+// so kubeconfig-free GKE cluster references in --contexts honor context
+// deadlines and Google auth settings (#858).
+func ResolveFleetTargetsContext(ctx context.Context, kubeconfig, kubeconfigDir, contextsRaw string) ([]FleetTarget, error) {
 	var (
 		wanted []string
 		all    bool
@@ -190,9 +393,9 @@ func ResolveFleetTargets(kubeconfig, kubeconfigDir, contextsRaw string) ([]Fleet
 				}
 			case len(wanted) > 0:
 				for _, name := range wanted {
-					if _, ok := f.cfg.Contexts[name]; ok {
+					if matched, ok := matchKubeconfigContext(f.cfg, name); ok {
 						matchedWanted[name] = true
-						targets = append(targets, FleetTarget{Kubeconfig: f.path, Context: name})
+						targets = append(targets, FleetTarget{Kubeconfig: f.path, Context: matched})
 					}
 				}
 			default:
@@ -227,7 +430,29 @@ func ResolveFleetTargets(kubeconfig, kubeconfigDir, contextsRaw string) ([]Fleet
 				targets = append(targets, FleetTarget{Kubeconfig: kubeconfig, Context: ref.Name})
 			}
 		} else {
+			cfg, loadErr := contextLoadingRules(kubeconfig).Load()
 			for _, name := range wanted {
+				if loadErr == nil && cfg != nil {
+					if matched, ok := matchKubeconfigContext(cfg, name); ok {
+						targets = append(targets, FleetTarget{Kubeconfig: kubeconfig, Context: matched})
+						continue
+					}
+				}
+				if kubeconfig == "" {
+					if id, ok := cloud.ParseClusterRef(name); ok {
+						hasExplicitKC := cfg != nil && len(cfg.Contexts) > 0
+						isExplicitResourcePath := strings.HasPrefix(strings.TrimSpace(name), "projects/") ||
+							strings.HasPrefix(strings.TrimSpace(name), "//container.googleapis.com/")
+						if !hasExplicitKC || isExplicitResourcePath || cloud.HasCredentialProxy() || cloud.IsInjectedGoogleAuth(ctx) {
+							t, terr := ResolveClusterTarget(ctx, id)
+							if terr != nil {
+								return nil, terr
+							}
+							targets = append(targets, FleetTarget{Context: id.Triple(), Target: &t})
+							continue
+						}
+					}
+				}
 				targets = append(targets, FleetTarget{Kubeconfig: kubeconfig, Context: name})
 			}
 		}

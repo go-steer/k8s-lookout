@@ -34,14 +34,34 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"k8s.io/client-go/rest"
 
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
+
+// SingleClusterSource is implemented by fleet sources that can resolve one
+// fully qualified GKE cluster on demand when a caller names a cluster outside
+// the configured startup scopes (#858). Static --clusters lists and explicit
+// kubeconfig fleets deliberately omit it so operator-pinned lists stay closed.
+type SingleClusterSource interface {
+	Source
+	ResolveCluster(ctx context.Context, id cloud.ClusterID) (cloud.ClusterRef, error)
+}
+
+// ContextClusterSource is implemented by kubeconfig-backed sources that can
+// report each context's underlying kubeconfig cluster entry name (for example
+// when a context was renamed from "gke_<p>_<l>_<c>" to a short alias).
+type ContextClusterSource interface {
+	Source
+	ContextClusters() map[string]string
+}
 
 // Source is where a multi-cluster process gets its clusters and each
 // cluster's credentials.
@@ -123,44 +143,121 @@ type Spec struct {
 // client-go's default search, or `kubeconfig:<path>` for one file.
 const KubeconfigScope = "kubeconfig"
 
+// AutoScope is the --clusters-from value that resolves the fleet source from
+// the task environment ($KUBECONFIG when set outside injected/proxy modes, else
+// CREDENTIAL_PROXY_URL or GKE discovery seeded from $GOOGLE_CLOUD_PROJECT /
+// $CLOUDSDK_CORE_PROJECT with lazy per-cluster widening).
+const AutoScope = "auto"
+
+// ClustersFromEnv is the optional environment variable equivalent of
+// --clusters-from on `lookout mcp` when neither --clusters nor --clusters-from
+// was passed on the command line.
+const ClustersFromEnv = "LOOKOUT_CLUSTERS_FROM"
+
+// hasExistingKubeconfigEnv reports whether $KUBECONFIG names at least one
+// existing kubeconfig file on disk.
+func hasExistingKubeconfigEnv() bool {
+	raw := strings.TrimSpace(os.Getenv("KUBECONFIG"))
+	if raw == "" {
+		return false
+	}
+	for _, p := range filepath.SplitList(raw) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if info, err := os.Stat(p); err == nil && !info.IsDir() { //nolint:gosec // operator-configured $KUBECONFIG path list
+			return true
+		}
+	}
+	return false
+}
+
+// DefaultAutoProject returns the default GCP project ID from the environment
+// ($GOOGLE_CLOUD_PROJECT, then $CLOUDSDK_CORE_PROJECT) when valid, or "".
+func DefaultAutoProject() string {
+	for _, k := range []string{"GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT"} {
+		if v := strings.TrimSpace(os.Getenv(k)); cloud.IsValidGCPProjectID(v) {
+			return v
+		}
+	}
+	return ""
+}
+
 // Resolve picks the cluster source for a spec: the kubeconfig enumerator
-// when --clusters-from says so, else a Fleet-capable cloud provider,
-// discovering --clusters-from's scopes or reaching --clusters' endpoints.
+// when --clusters-from says so, CREDENTIAL_PROXY_URL when configured, else
+// a Fleet-capable cloud provider discovering --clusters-from's scopes or
+// reaching --clusters' endpoints.
 func Resolve(ctx context.Context, spec Spec) (Source, error) {
 	if spec.Clusters != "" && spec.ClustersFrom != "" {
 		return nil, errors.New("--clusters and --clusters-from are mutually exclusive: list endpoints OR discover them, not both")
 	}
+	proxy, proxyErr := cloud.CredentialProxyFromEnv()
 	var (
 		scopes []cloud.Scope
 		static []cloud.ClusterRef
+		isAuto bool
 	)
 	if spec.ClustersFrom != "" {
 		parsed, err := ParseScopes(spec.ClustersFrom)
 		if err != nil {
 			return nil, err
 		}
-		if parsed.Kubeconfig {
-			return kubeconfigSource{path: parsed.KubeconfigPath}, nil
-		}
-		scopes = parsed.Scopes
 		if err := ValidFolderSearch(spec.FolderSearch); err != nil {
 			return nil, err
 		}
-		for i := range scopes {
-			if scopes[i].Kind == cloud.ScopeFolder || scopes[i].Kind == cloud.ScopeOrganization {
-				scopes[i].Search = spec.FolderSearch
+		if parsed.Kubeconfig {
+			return &kubeconfigSource{path: parsed.KubeconfigPath}, nil
+		}
+		if proxyErr != nil {
+			return nil, proxyErr
+		}
+		if parsed.Auto {
+			if hasExistingKubeconfigEnv() {
+				return &kubeconfigSource{}, nil
+			}
+			isAuto = true
+			proj := spec.Project
+			if !cloud.IsValidGCPProjectID(proj) {
+				proj = DefaultAutoProject()
+			}
+			if proj != "" {
+				scopes = []cloud.Scope{{Kind: cloud.ScopeProject, Project: proj}}
+			}
+		} else {
+			scopes = parsed.Scopes
+			for i := range scopes {
+				if scopes[i].Kind == cloud.ScopeFolder || scopes[i].Kind == cloud.ScopeOrganization {
+					scopes[i].Search = spec.FolderSearch
+				}
 			}
 		}
 	} else {
+		if proxyErr != nil {
+			return nil, proxyErr
+		}
 		refs, err := ParseClusters(spec.Clusters)
 		if err != nil {
 			return nil, err
 		}
 		static = refs
 	}
-	cfg := cloud.Config{Project: spec.Project}
+	if proxy != nil {
+		var scoped cloud.ScopedFleet
+		if p, err := cloud.New(ctx, cloud.Config{Project: spec.Project, SkipMetadata: true}); err == nil {
+			scoped, _ = p.(cloud.ScopedFleet)
+		}
+		return &credentialProxySource{
+			proxy:  proxy,
+			scoped: scoped,
+			scopes: scopes,
+			static: static,
+			auto:   isAuto,
+		}, nil
+	}
+	cfg := cloud.Config{Project: spec.Project, SkipMetadata: true}
 	if len(scopes) == 1 && scopes[0].Kind == cloud.ScopeProject {
-		cfg = cloud.Config{Project: scopes[0].Project, Location: scopes[0].Location}
+		cfg = cloud.Config{Project: scopes[0].Project, Location: scopes[0].Location, SkipMetadata: true}
 	}
 	provider, err := cloud.New(ctx, cfg)
 	if err != nil {
@@ -168,16 +265,36 @@ func Resolve(ctx context.Context, spec Spec) (Source, error) {
 	}
 	fl, ok := provider.(cloud.Fleet)
 	if !ok {
+		if isAuto {
+			return untaggedAutoSource{providerName: provider.Name()}, nil
+		}
 		return nil, fmt.Errorf("multi-cluster: provider %q cannot mint kubeconfig-free cluster credentials — build with -tags gke for GKE, or use a kubeconfig with --clusters-from=%s[:<path>] (one cluster per context, no cloud API needed)",
 			provider.Name(), KubeconfigScope)
 	}
-	src := cloudSource{fleet: fl, name: provider.Name(), scopes: scopes, static: static}
+	src := cloudSource{fleet: fl, name: provider.Name(), scopes: scopes, static: static, auto: isAuto}
+	if lk, ok := provider.(cloud.ClusterLookup); ok {
+		src.lookup = lk
+	}
 	if sf, ok := provider.(cloud.ScopedFleet); ok {
 		src.scoped = sf
 	} else if needsScoped(scopes) {
 		return nil, fmt.Errorf("multi-cluster: provider %q discovers only its own project; %q needs a provider that can search other projects, fleets and folders", provider.Name(), spec.ClustersFrom)
 	}
 	return src, nil
+}
+
+type untaggedAutoSource struct {
+	providerName string
+}
+
+func (u untaggedAutoSource) Describe() string { return "auto" }
+
+func (u untaggedAutoSource) Discover(context.Context) (Result, error) {
+	return Result{}, fmt.Errorf("multi-cluster: provider %q cannot mint kubeconfig-free cluster credentials — build with -tags gke for GKE, set KUBECONFIG, or set CREDENTIAL_PROXY_URL", u.providerName)
+}
+
+func (u untaggedAutoSource) RESTConfig(context.Context, cloud.ClusterRef) (*rest.Config, error) {
+	return nil, fmt.Errorf("multi-cluster: provider %q cannot mint kubeconfig-free cluster credentials — build with -tags gke for GKE", u.providerName)
 }
 
 // ValidFolderSearch checks a --folder-discovery value.
@@ -200,20 +317,65 @@ func needsScoped(scopes []cloud.Scope) bool {
 // explicit endpoints.
 type cloudSource struct {
 	fleet  cloud.Fleet
-	scoped cloud.ScopedFleet // nil when the provider has only Fleet
+	scoped cloud.ScopedFleet   // nil when the provider has only Fleet
+	lookup cloud.ClusterLookup // nil when the provider has no single-cluster lookup
 	name   string
 	scopes []cloud.Scope
 	static []cloud.ClusterRef
+	auto   bool
 }
+
+var _ SingleClusterSource = cloudSource{}
 
 func (s cloudSource) Describe() string { return "cloud provider " + s.name }
 
 func (s cloudSource) RESTConfig(ctx context.Context, ref cloud.ClusterRef) (*rest.Config, error) {
+	if ref.Endpoint == "" && ref.Project != "" && ref.Location != "" && ref.Name != "" {
+		if s.lookup != nil {
+			resolved, err := s.lookup.LookupCluster(ctx, ref.Project, ref.Location, ref.Name)
+			if err != nil {
+				return nil, err
+			}
+			ref = resolved
+		}
+	}
 	return s.fleet.RESTConfig(ctx, ref)
+}
+
+func (s cloudSource) ResolveCluster(ctx context.Context, id cloud.ClusterID) (cloud.ClusterRef, error) {
+	if len(s.static) > 0 {
+		return cloud.ClusterRef{}, errors.New("static --clusters list cannot be widened dynamically")
+	}
+	if !cloud.ValidClusterID(id.Project, id.Location, id.Cluster) {
+		return cloud.ClusterRef{}, fmt.Errorf("invalid GKE cluster reference %q", id.Triple())
+	}
+	if s.lookup != nil {
+		return s.lookup.LookupCluster(ctx, id.Project, id.Location, id.Cluster)
+	}
+	if s.scoped != nil {
+		disc, err := s.scoped.Discover(ctx, cloud.Scope{
+			Kind:     cloud.ScopeProject,
+			Project:  id.Project,
+			Location: id.Location,
+		})
+		if err != nil {
+			return cloud.ClusterRef{}, err
+		}
+		for _, r := range disc.Clusters {
+			if r.Name == id.Cluster {
+				return r, nil
+			}
+		}
+		return cloud.ClusterRef{}, fmt.Errorf("cluster %q under %s/%s: %w", id.Cluster, id.Project, id.Location, cloud.ErrClusterNotFound)
+	}
+	return cloud.ClusterRef{}, fmt.Errorf("provider %q cannot resolve clusters outside its configured project", s.name)
 }
 
 func (s cloudSource) Discover(ctx context.Context) (Result, error) {
 	if len(s.scopes) == 0 {
+		if s.auto {
+			return Result{}, nil
+		}
 		return Result{Clusters: append([]cloud.ClusterRef(nil), s.static...)}, nil
 	}
 	var (
@@ -250,6 +412,9 @@ func (s cloudSource) Discover(ctx context.Context) (Result, error) {
 		res.Scopes = append(res.Scopes, sr)
 	}
 	if failed == len(s.scopes) {
+		if s.auto {
+			return res, nil
+		}
 		return res, errors.Join(errs...)
 	}
 	return res, nil
@@ -279,52 +444,75 @@ type kubeconfigSource struct {
 	// path is an explicit kubeconfig file; empty means client-go's
 	// default search ($KUBECONFIG, else ~/.kube/config).
 	path string
+
+	mu       sync.Mutex
+	clusters map[string]string
 }
 
-func (k kubeconfigSource) Describe() string {
+var _ ContextClusterSource = (*kubeconfigSource)(nil)
+
+func (k *kubeconfigSource) Describe() string {
 	if k.path == "" {
 		return "kubeconfig (default search: $KUBECONFIG, else ~/.kube/config)"
 	}
 	return "kubeconfig " + k.path
 }
 
-func (k kubeconfigSource) Discover(context.Context) (Result, error) {
+func (k *kubeconfigSource) Discover(context.Context) (Result, error) {
 	ctxs, err := kube.ListContexts(k.path)
 	if err != nil {
 		return Result{}, err
 	}
 	refs := make([]cloud.ClusterRef, 0, len(ctxs))
+	byCtx := make(map[string]string, len(ctxs))
 	for _, c := range ctxs {
 		refs = append(refs, cloud.ClusterRef{Name: c.Name, Endpoint: c.Server})
+		if c.Cluster != "" {
+			byCtx[c.Name] = c.Cluster
+		}
 	}
+	k.mu.Lock()
+	k.clusters = byCtx
+	k.mu.Unlock()
 	return Result{Clusters: refs, Scopes: []ScopeResult{{Scope: k.Describe(), Clusters: len(refs), Via: "kubeconfig"}}}, nil
 }
 
-func (k kubeconfigSource) RESTConfig(_ context.Context, ref cloud.ClusterRef) (*rest.Config, error) {
+func (k *kubeconfigSource) ContextClusters() map[string]string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return maps.Clone(k.clusters)
+}
+
+func (k *kubeconfigSource) RESTConfig(_ context.Context, ref cloud.ClusterRef) (*rest.Config, error) {
 	return kube.ConfigForContext(k.path, ref.Name)
 }
 
-// Scopes is a parsed --clusters-from: cloud scopes, or a kubeconfig.
+// Scopes is a parsed --clusters-from: cloud scopes, auto, or a kubeconfig.
 type Scopes struct {
 	Scopes         []cloud.Scope
 	Kubeconfig     bool
 	KubeconfigPath string
+	Auto           bool
 }
 
 // ParseScopes parses --clusters-from: a comma-separated list of scopes,
 // which may be mixed:
 //
 //	my-project, my-project/us-central1   one project, all or one location
+//	projects/<p>[/locations/<l>]         resource-path spelling of the above
 //	fleet:<host-project>                 a GKE fleet's members
 //	folders/<id>, organizations/<id>     everything under a folder or org
 //
-// or, alone, kubeconfig or kubeconfig:<path>. `kubeconfig`, `fleet:`,
-// `folders/` and `organizations/` are therefore reserved and cannot name
-// a project; no project is named any of them in practice.
+// or, alone, auto, kubeconfig, or kubeconfig:<path>. `auto`, `kubeconfig`,
+// `fleet:`, `folders/` and `organizations/` are therefore reserved and cannot
+// name a project; no project is named any of them in practice.
 func ParseScopes(s string) (Scopes, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return Scopes{}, errors.New("--clusters-from is empty")
+	}
+	if s == AutoScope {
+		return Scopes{Auto: true}, nil
 	}
 	if path, ok := parseKubeconfig(s); ok {
 		return Scopes{Kubeconfig: true, KubeconfigPath: path}, nil
@@ -335,6 +523,9 @@ func ParseScopes(s string) (Scopes, error) {
 		item = strings.TrimSpace(item)
 		if item == "" {
 			continue
+		}
+		if item == AutoScope {
+			return Scopes{}, fmt.Errorf("--clusters-from: %q cannot be combined with explicit scopes; auto is the whole value", item)
 		}
 		if _, ok := parseKubeconfig(item); ok {
 			return Scopes{}, fmt.Errorf("--clusters-from: %q cannot be combined with cloud scopes; a kubeconfig fleet is the whole value", item)
@@ -369,9 +560,27 @@ func parseScope(item string) (cloud.Scope, error) {
 			return cloud.Scope{Kind: kind, ID: id}, nil
 		}
 	}
+	if rest, ok := strings.CutPrefix(item, "projects/"); ok {
+		parts := strings.Split(rest, "/")
+		switch {
+		case len(parts) == 1 && parts[0] != "":
+			return cloud.Scope{Kind: cloud.ScopeProject, Project: parts[0]}, nil
+		case len(parts) == 3 && (parts[1] == "locations" || parts[1] == "zones") && parts[0] != "" && parts[2] != "":
+			loc := parts[2]
+			if loc == "-" {
+				loc = ""
+			}
+			return cloud.Scope{Kind: cloud.ScopeProject, Project: parts[0], Location: loc}, nil
+		default:
+			return cloud.Scope{}, fmt.Errorf("--clusters-from: %q: want projects/<project> or projects/<project>/locations/<location>", item)
+		}
+	}
 	project, location, _ := strings.Cut(item, "/")
 	if project == "" || strings.Contains(location, "/") {
 		return cloud.Scope{}, fmt.Errorf("--clusters-from: %q is not a project, project/location, fleet:<host>, folders/<id> or organizations/<id>", item)
+	}
+	if location == "-" {
+		location = ""
 	}
 	return cloud.Scope{Kind: cloud.ScopeProject, Project: project, Location: location}, nil
 }
@@ -411,6 +620,19 @@ func ParseClusters(s string) ([]cloud.ClusterRef, error) {
 		if i := strings.IndexByte(it, '='); i >= 0 {
 			name = strings.TrimSpace(it[:i])
 			endpoint = strings.TrimSpace(it[i+1:])
+		} else if id, ok := cloud.ParseClusterRef(it); ok {
+			key := id.Triple()
+			if seen[key] {
+				return nil, fmt.Errorf("--clusters: duplicate cluster name %q", key)
+			}
+			seen[key] = true
+			refs = append(refs, cloud.ClusterRef{
+				Name:     id.Cluster,
+				Project:  id.Project,
+				Location: id.Location,
+				Region:   gkeLocationRegion(id.Location),
+			})
+			continue
 		} else {
 			endpoint = it
 			name = shortClusterName(endpoint)
@@ -421,11 +643,23 @@ func ParseClusters(s string) ([]cloud.ClusterRef, error) {
 		if name == "" {
 			return nil, fmt.Errorf("--clusters: entry %q has no cluster name", it)
 		}
-		if seen[name] {
+		ref := cloud.ClusterRef{Name: name, Endpoint: endpoint}
+		dedupKey := name
+		if id, ok := cloud.ParseClusterRef(name); ok {
+			ref = cloud.ClusterRef{
+				Name:     id.Cluster,
+				Project:  id.Project,
+				Location: id.Location,
+				Region:   gkeLocationRegion(id.Location),
+				Endpoint: endpoint,
+			}
+			dedupKey = id.Triple()
+		}
+		if seen[dedupKey] {
 			return nil, fmt.Errorf("--clusters: duplicate cluster name %q", name)
 		}
-		seen[name] = true
-		refs = append(refs, cloud.ClusterRef{Name: name, Endpoint: endpoint})
+		seen[dedupKey] = true
+		refs = append(refs, ref)
 	}
 	return refs, nil
 }

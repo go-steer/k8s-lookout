@@ -16,9 +16,131 @@ package cloud
 
 import (
 	"context"
+	"errors"
+	"regexp"
+	"strings"
 
 	"k8s.io/client-go/rest"
 )
+
+// ErrClusterNotFound reports that a looked-up cluster definitively does not
+// exist (HTTP 404 / absent from authoritative cluster listing), as opposed to
+// transient network, credential, or permission failures.
+var ErrClusterNotFound = errors.New("cluster not found")
+
+// ClusterID is a canonical GKE cluster identity (project, location, cluster).
+type ClusterID struct {
+	Project  string
+	Location string
+	Cluster  string
+}
+
+// Triple returns "<project>/<location>/<cluster>".
+func (c ClusterID) Triple() string {
+	return c.Project + "/" + c.Location + "/" + c.Cluster
+}
+
+// ResourcePath returns "projects/<project>/locations/<location>/clusters/<cluster>".
+func (c ClusterID) ResourcePath() string {
+	return "projects/" + c.Project + "/locations/" + c.Location + "/clusters/" + c.Cluster
+}
+
+// ContextName returns the gcloud kubeconfig context name
+// "gke_<project>_<location>_<cluster>".
+func (c ClusterID) ContextName() string {
+	return "gke_" + c.Project + "_" + c.Location + "_" + c.Cluster
+}
+
+var (
+	projectSegmentRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.:_-]*$`)
+	clusterSegmentRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	gcpProjectIDRE   = regexp.MustCompile(`^(?:[a-z0-9.-]+:)?[a-z][a-z0-9-]{1,61}[a-z0-9]$`)
+)
+
+// ValidClusterID reports whether project, location, and cluster are safe,
+// non-traversal GKE identifier segments.
+func ValidClusterID(project, location, cluster string) bool {
+	if !projectSegmentRE.MatchString(project) || !clusterSegmentRE.MatchString(location) || !clusterSegmentRE.MatchString(cluster) {
+		return false
+	}
+	switch project {
+	case "auto", "kubeconfig", "fleet", "folders", "organizations", "projects":
+		return false
+	}
+	for _, s := range []string{project, location, cluster} {
+		if strings.Contains(s, "..") {
+			return false
+		}
+	}
+	return true
+}
+
+// IsValidGCPProjectID reports whether s is a valid GCP project ID (and not one
+// of lookout's reserved --clusters-from keywords).
+func IsValidGCPProjectID(s string) bool {
+	if !gcpProjectIDRE.MatchString(s) || strings.Contains(s, "..") {
+		return false
+	}
+	switch s {
+	case "auto", "kubeconfig", "fleet", "folders", "organizations":
+		return false
+	}
+	return true
+}
+
+// ParseClusterRef parses a GKE cluster reference in any of the forms accepted
+// across lookout's CLI and MCP surfaces:
+//   - "//container.googleapis.com/projects/<p>/locations/<l>/clusters/<c>" (or zones/<l>)
+//   - "projects/<p>/locations/<l>/clusters/<c>" (or zones/<l>)
+//   - "gke_<p>_<l>_<c>"
+//   - "<p>/<l>/<c>"
+func ParseClusterRef(raw string) (ClusterID, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" || strings.ContainsAny(s, "=@") {
+		return ClusterID{}, false
+	}
+	for _, prefix := range []string{
+		"https://container.googleapis.com/v1beta1/",
+		"https://container.googleapis.com/v1/",
+		"//container.googleapis.com/",
+	} {
+		if rest, ok := strings.CutPrefix(s, prefix); ok {
+			s = rest
+			break
+		}
+	}
+	s = strings.Trim(s, "/")
+	if strings.HasPrefix(s, "projects/") {
+		parts := strings.Split(s, "/")
+		if len(parts) == 6 && parts[0] == "projects" && (parts[2] == "locations" || parts[2] == "zones") && parts[4] == "clusters" {
+			if ValidClusterID(parts[1], parts[3], parts[5]) {
+				return ClusterID{Project: parts[1], Location: parts[3], Cluster: parts[5]}, true
+			}
+		}
+		return ClusterID{}, false
+	}
+	if strings.HasPrefix(s, "gke_") {
+		parts := strings.SplitN(s, "_", 4)
+		if len(parts) == 4 && ValidClusterID(parts[1], parts[2], parts[3]) {
+			return ClusterID{Project: parts[1], Location: parts[2], Cluster: parts[3]}, true
+		}
+		return ClusterID{}, false
+	}
+	parts := strings.Split(s, "/")
+	if len(parts) == 3 {
+		switch parts[0] {
+		case "projects", "folders", "organizations":
+			return ClusterID{}, false
+		}
+		if strings.HasPrefix(parts[0], "fleet:") {
+			return ClusterID{}, false
+		}
+		if ValidClusterID(parts[0], parts[1], parts[2]) {
+			return ClusterID{Project: parts[0], Location: parts[1], Cluster: parts[2]}, true
+		}
+	}
+	return ClusterID{}, false
+}
 
 // ClusterRef identifies one Kubernetes cluster a Fleet provider can
 // connect to without a kubeconfig. Name is the human-readable cluster
@@ -152,4 +274,11 @@ type ScopedFleet interface {
 	// not read at all is an error; parts of a scope it may not read are
 	// counted in Skipped.
 	Discover(ctx context.Context, s Scope) (Discovery, error)
+}
+
+// ClusterLookup is the OPTIONAL Fleet surface for resolving one fully
+// qualified cluster (project, location, name) on demand without listing an
+// entire project or folder.
+type ClusterLookup interface {
+	LookupCluster(ctx context.Context, project, location, name string) (ClusterRef, error)
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/go-steer/k8s-lookout/internal/version"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/checks/netprobe"
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 )
 
 // lookout mcp registers in the multicall root like watch — it is a
@@ -263,18 +264,26 @@ Flags:
                         scopes as lookout watch, comma-separated and
                         mixable — project[/location], fleet:<host>,
                         folders/<id>, organizations/<id> — or alone,
-                        kubeconfig[:<path>] (one cluster per context).
-                        With --google-client-id, discovery runs as each
-                        caller, with their token, cached five minutes:
-                        a caller sees only the clusters they can read,
-                        and lookout needs no IAM; GKE clusters only, so
-                        no kubeconfig fleet and only *.gke.goog
-                        --clusters endpoints. Otherwise it runs as
-                        lookout at startup and every --rediscover. A
-                        name unique in the caller's set is used bare;
-                        a repeated one is name@project (then
-                        name@project/location); project/location/name
-                        always works. --store and --report become stems:
+                        kubeconfig[:<path>] (one cluster per context) or
+                        auto ($KUBECONFIG when set, else CREDENTIAL_PROXY_URL
+                        or GKE discovery seeded from $GOOGLE_CLOUD_PROJECT).
+                        Also configurable via LOOKOUT_CLUSTERS_FROM, and
+                        enabled automatically as auto when injected Google
+                        auth or CREDENTIAL_PROXY_URL is active without
+                        --kubeconfig/--context. With --google-client-id,
+                        discovery runs as each caller, with their token,
+                        cached five minutes: a caller sees only the clusters
+                        they can read, and lookout needs no IAM; GKE clusters
+                        only, so no kubeconfig fleet and only *.gke.goog
+                        --clusters endpoints. Otherwise discovery runs lazily
+                        on first use and every --rediscover, resolving
+                        fully qualified GKE cluster paths on demand without a
+                        restart. A name unique in the caller's set is used
+                        bare; a repeated one is name@project (then
+                        name@project/location); project/location/name,
+                        projects/<p>/locations/<l>/clusters/<c>, and
+                        gke_<p>_<l>_<c> always work. --store and --report
+                        become stems:
                         each call reads its cluster's own file, named
                         the way a multi-cluster watch names it (not in
                         Google-token mode, where file names cannot be
@@ -283,6 +292,18 @@ Flags:
                         cluster but the one lookout runs in. Serves
                         stateless HTTP, so replicas need no sticky
                         sessions.
+  --google-auth=auto|adc|injected
+                        how outbound Google Cloud and GKE control-plane DNS
+                        calls authenticate outside Google-token mode: auto
+                        (default: honors LOOKOUT_GOOGLE_AUTH,
+                        CORE_AGENT_GOOGLE_AUTH, and MAST_GOOGLE_AUTH), adc
+                        (Application Default Credentials), or injected
+                        (static placeholder bearer token for an injecting
+                        egress gateway, with zero GCE metadata lookups).
+                        When CREDENTIAL_PROXY_URL (and optional
+                        CREDENTIAL_PROXY_TOKEN_FILE) is set, Google discovery
+                        and cluster API reads route through /v1/gcp/ and
+                        /v1/k8s/<p>/<l>/<c> automatically.
   --rediscover=<dur>    how often the shared cluster set is refreshed
                         without Google-token mode (default 10m).
   --default-cluster=<name>
@@ -419,6 +440,54 @@ func runMCP(ctx context.Context, args []string) int {
 	return mcpMain(ctx, args, os.Stdout, os.Stderr)
 }
 
+func validateMCPGoogleFlags(googleMode bool, googleAuth, authTokenFile, googleAllow, googleAllowWrite, googleGroupsSA, resourceURL string) string {
+	if !googleMode {
+		for _, f := range []struct {
+			name string
+			set  bool
+		}{
+			{"--google-allow", googleAllow != ""},
+			{"--google-allow-write", googleAllowWrite != ""},
+			{"--google-groups-service-account", googleGroupsSA != ""},
+			{"--resource-url", resourceURL != ""},
+		} {
+			if f.set {
+				return f.name + " only applies in Google-token mode; pass --google-client-id as well."
+			}
+		}
+		return ""
+	}
+	if norm, _ := cloud.NormalizeGoogleAuth(googleAuth); norm == cloud.GoogleAuthInjected {
+		return "--google-auth=injected and --google-client-id are exclusive: Google-token mode sends each caller's own Google token"
+	}
+	if cloud.HasCredentialProxy() {
+		return "CREDENTIAL_PROXY_URL cannot be combined with --google-client-id: Google-token mode sends each caller's own Google token directly to *.gke.goog"
+	}
+	switch {
+	case authTokenFile != "":
+		return "--google-client-id and --auth-token-file are exclusive: pick one way to authenticate callers"
+	case googleAllow == "":
+		return "--google-client-id needs --google-allow: an empty allow-list would admit no one"
+	case resourceURL == "":
+		return "--google-client-id needs --resource-url, this server's MCP URL as clients reach it (e.g. https://lookout.example.com/mcp)"
+	default:
+		return ""
+	}
+}
+
+func effectiveClustersFrom(ctx context.Context, googleMode bool, clustersFlag, clustersFrom, kubeconfig, contextName string) string {
+	if clustersFlag != "" || clustersFrom != "" || kubeconfig != "" || contextName != "" {
+		return clustersFrom
+	}
+	if envScopes := strings.TrimSpace(os.Getenv(fleet.ClustersFromEnv)); envScopes != "" {
+		return envScopes
+	}
+	if !googleMode && (cloud.IsInjectedGoogleAuth(ctx) || cloud.HasCredentialProxy()) {
+		return fleet.AutoScope
+	}
+	return ""
+}
+
 // mcpMain is runMCP with injectable streams for tests.
 func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("lookout mcp", flag.ContinueOnError)
@@ -450,6 +519,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	defaultCluster := fs.String("default-cluster", "", "the cluster a call that names none reads, when the caller can read it")
 	defaultProject := fs.String("default-project", "", "the project preferred when a call names no cluster or a repeated name")
 	folderDiscovery := fs.String("folder-discovery", "", "how folder and organization scopes are searched: auto, asset or resourcemanager")
+	googleAuth := fs.String("google-auth", "", "how Google Cloud and GKE DNS calls authenticate: auto, adc, or injected")
 	wf := registerWorkloadFlags(fs)
 	of := registerOAuthFlags(fs)
 	reg := checks.Default()
@@ -465,40 +535,24 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "lookout mcp: unexpected argument %q\nRun 'lookout mcp --help' for usage.\n", fs.Arg(0))
 		return 2
 	}
+	if err := cloud.ValidateGoogleAuth(*googleAuth); err != nil {
+		fmt.Fprintf(stderr, "lookout mcp: %v\nRun 'lookout mcp --help' for usage.\n", err)
+		return 2
+	}
+	if *googleAuth != "" {
+		ctx = cloud.WithGoogleAuth(ctx, *googleAuth)
+	}
+	if _, err := cloud.CredentialProxyFromEnv(); err != nil {
+		fmt.Fprintf(stderr, "lookout mcp: %v\nRun 'lookout mcp --help' for usage.\n", err)
+		return 2
+	}
 	// The HTTP-only flags are rejected on stdio rather than ignored: a
 	// token that authenticates nothing reads, to whoever wrote the
 	// config, exactly like a token that does.
 	googleMode := *googleClientID != ""
-	if !googleMode {
-		for _, f := range []struct {
-			name string
-			set  bool
-		}{
-			{"--google-allow", *googleAllow != ""},
-			{"--google-allow-write", *googleAllowWrite != ""},
-			{"--google-groups-service-account", *googleGroupsSA != ""},
-			{"--resource-url", *resourceURL != ""},
-		} {
-			if f.set {
-				fmt.Fprintf(stderr, "lookout mcp: %s only applies in Google-token mode; pass --google-client-id as well.\n"+
-					"Run 'lookout mcp --help' for usage.\n", f.name)
-				return 2
-			}
-		}
-	} else {
-		var problem string
-		switch {
-		case *authTokenFile != "":
-			problem = "--google-client-id and --auth-token-file are exclusive: pick one way to authenticate callers"
-		case *googleAllow == "":
-			problem = "--google-client-id needs --google-allow: an empty allow-list would admit no one"
-		case *resourceURL == "":
-			problem = "--google-client-id needs --resource-url, this server's MCP URL as clients reach it (e.g. https://lookout.example.com/mcp)"
-		}
-		if problem != "" {
-			fmt.Fprintf(stderr, "lookout mcp: %s\nRun 'lookout mcp --help' for usage.\n", problem)
-			return 2
-		}
+	if problem := validateMCPGoogleFlags(googleMode, *googleAuth, *authTokenFile, *googleAllow, *googleAllowWrite, *googleGroupsSA, *resourceURL); problem != "" {
+		fmt.Fprintf(stderr, "lookout mcp: %s\nRun 'lookout mcp --help' for usage.\n", problem)
+		return 2
 	}
 	if problem := of.problem(googleMode); problem != "" {
 		fmt.Fprintf(stderr, "lookout mcp: %s\n", problem)
@@ -533,7 +587,8 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
 		return 2
 	}
-	multiCluster := *clustersFlag != "" || *clustersFrom != ""
+	clustersFromVal := effectiveClustersFrom(ctx, googleMode, *clustersFlag, *clustersFrom, *kubeconfig, *contextName)
+	multiCluster := *clustersFlag != "" || clustersFromVal != ""
 	if !multiCluster {
 		for _, f := range []struct {
 			name string
@@ -565,7 +620,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "lookout mcp: --max-response-bytes must not be negative (0 disables the cap)\nRun 'lookout mcp --help' for usage.\n")
 		return 2
 	}
-	if problem := multiClusterProblem(multiCluster, googleMode, *clustersFlag, *clustersFrom, *kubeconfig, *contextName, *store, *report, *rediscover, fs); problem != "" {
+	if problem := multiClusterProblem(multiCluster, googleMode, *clustersFlag, clustersFromVal, *kubeconfig, *contextName, *store, *report, *rediscover, fs); problem != "" {
 		fmt.Fprintf(stderr, "lookout mcp: %s\nRun 'lookout mcp --help' for usage.\n", problem)
 		return 2
 	}
@@ -653,26 +708,31 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	var (
 		clusters *mcpserver.Clusters
-		local    string
+		localFn  func(context.Context) string
 	)
 	if multiCluster {
-		c, code := startClusters(ctx, fleet.Spec{Clusters: *clustersFlag, ClustersFrom: *clustersFrom, FolderSearch: *folderDiscovery},
-			googleMode, *rediscover, *defaultCluster, *defaultProject, stderr)
+		effDefaultProject := *defaultProject
+		if effDefaultProject == "" && clustersFromVal == fleet.AutoScope {
+			effDefaultProject = fleet.DefaultAutoProject()
+		}
+		c, code := startClusters(ctx, fleet.Spec{Clusters: *clustersFlag, ClustersFrom: clustersFromVal, FolderSearch: *folderDiscovery},
+			googleMode, *rediscover, *defaultCluster, effDefaultProject, stderr)
 		if c == nil {
 			return code
 		}
 		clusters = c
-		local = localClusterName(ctx)
+		localFn = localClusterName
 	}
 
 	server := mcpserver.New(reg, version.Semver(),
 		mcpserver.WithClusters(clusters),
-		mcpserver.WithLocalCluster(local),
+		mcpserver.WithLocalClusterFunc(localFn),
 		mcpserver.WithMaxConcurrencyPerCluster(*maxPerCluster),
 		mcpserver.WithMaxResponseBytes(*maxResponseBytes),
 		mcpserver.WithTools(selected),
 		mcpserver.WithAccessLog(log),
 		mcpserver.WithSelection(*kubeconfig, *contextName),
+		mcpserver.WithGoogleAuthMode(*googleAuth),
 		mcpserver.WithExemptions(*exemptions),
 		mcpserver.WithStore(*store),
 		mcpserver.WithReport(*report),

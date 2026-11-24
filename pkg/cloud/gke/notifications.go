@@ -85,8 +85,12 @@ func subscriptionID(project, configured string) (string, string) {
 }
 
 func (r *pubsubReceiver) Receive(ctx context.Context, handle func(pubsubMessage)) error {
+	if err := grpcCredentialProxyErr(ctx); err != nil {
+		return err
+	}
 	project, name := subscriptionID(r.project, r.subscription)
-	client, err := pubsub.NewClient(ctx, project, clientOptions(ctx)...)
+	gctx := withGRPCClient(ctx)
+	client, err := pubsub.NewClient(ctx, project, clientOptions(gctx)...)
 	if err != nil {
 		return fmt.Errorf("pubsub client: %w", err)
 	}

@@ -23,6 +23,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -79,6 +81,10 @@ type ServeOptions struct {
 	// (#700). lookout keeps no per-session state and sends no
 	// server-to-client notifications, so it loses nothing.
 	Stateless bool
+	// Stdin and Stdout override os.Stdin and os.Stdout when serving the
+	// stdio transport (used by tests; nil uses the process streams).
+	Stdin  io.Reader
+	Stdout io.Writer
 }
 
 // Serve runs the server until ctx is canceled or the peer
@@ -118,11 +124,7 @@ func Serve(ctx context.Context, server *mcp.Server, opts ServeOptions) error {
 		if opts.Google != nil {
 			return errors.New("--google-client-id needs --listen: on stdio there is no HTTP request to carry a caller's token")
 		}
-		err := server.Run(ctx, &mcp.StdioTransport{})
-		if errors.Is(err, context.Canceled) || isPeerDisconnect(err) {
-			return nil // clean shutdown on signal or client exit
-		}
-		return err
+		return serveStdio(ctx, server, opts.Stdin, opts.Stdout)
 	}
 
 	// Re-checked here rather than trusted from the caller: Serve is
@@ -326,6 +328,184 @@ const codeServerClosing = -32004
 func isPeerDisconnect(err error) bool {
 	var wire *jsonrpc.Error
 	return errors.As(err, &wire) && wire.Code == codeServerClosing
+}
+
+var (
+	stdioServerCtxMu sync.RWMutex
+	stdioServerCtx   = map[*mcp.Server]context.Context{}
+)
+
+// bindServeContext ties an incoming stdio tool call's context to Serve's
+// signal context so SIGTERM aborts in-flight tool calls immediately rather
+// than waiting for the SDK's non-propagating IOTransport (#858). Keyed by
+// *mcp.Server and registered before server.Connect starts reading stdin so
+// even pipelined initial tool calls never miss cancellation.
+func bindServeContext(ctx context.Context, server *mcp.Server) (context.Context, context.CancelFunc) {
+	if server == nil {
+		return ctx, func() {}
+	}
+	stdioServerCtxMu.RLock()
+	serveCtx := stdioServerCtx[server]
+	stdioServerCtxMu.RUnlock()
+	if serveCtx == nil {
+		return ctx, func() {}
+	}
+	merged, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(serveCtx, cancel)
+	return merged, func() {
+		stop()
+		cancel()
+	}
+}
+
+// serveStdio serves server over stdin/stdout without letting a blocking
+// os.Stdin.Read or os.Stdin.Close hold process shutdown open when SIGTERM
+// cancels ctx before the parent closes stdin (#858).
+func serveStdio(ctx context.Context, server *mcp.Server, stdin io.Reader, stdout io.Writer) error {
+	if stdin == nil {
+		stdin = os.Stdin
+	}
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	stdioServerCtxMu.Lock()
+	stdioServerCtx[server] = ctx
+	stdioServerCtxMu.Unlock()
+	defer func() {
+		stdioServerCtxMu.Lock()
+		delete(stdioServerCtx, server)
+		stdioServerCtxMu.Unlock()
+	}()
+
+	reader := newCancelableReader(ctx, stdin)
+	defer func() { _ = reader.Close() }()
+	transport := &mcp.IOTransport{
+		Reader: reader,
+		Writer: nopWriteCloser{w: stdout},
+	}
+	ss, err := server.Connect(ctx, transport, nil)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- ss.Wait()
+	}()
+
+	select {
+	case <-ctx.Done():
+		_ = reader.Close()
+		_ = ss.Close()
+		<-done
+		return nil
+	case err := <-done:
+		if err == nil || errors.Is(err, context.Canceled) || isPeerDisconnect(err) {
+			return nil
+		}
+		return err
+	}
+}
+
+type nopWriteCloser struct {
+	w io.Writer
+}
+
+func (n nopWriteCloser) Write(p []byte) (int, error) { return n.w.Write(p) }
+func (nopWriteCloser) Close() error                  { return nil }
+
+type readChunk struct {
+	data []byte
+	err  error
+}
+
+type cancelableReader struct {
+	ctx     context.Context
+	chunks  <-chan readChunk
+	buf     []byte
+	pending error
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func newCancelableReader(ctx context.Context, r io.Reader) *cancelableReader {
+	ch := make(chan readChunk, 1)
+	closed := make(chan struct{})
+	go func() {
+		defer close(ch)
+		var scratch [32 * 1024]byte
+		for {
+			n, err := r.Read(scratch[:])
+			var data []byte
+			if n > 0 {
+				data = append([]byte(nil), scratch[:n]...)
+			}
+			select {
+			case ch <- readChunk{data: data, err: err}:
+			case <-ctx.Done():
+				return
+			case <-closed:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return &cancelableReader{
+		ctx:    ctx,
+		chunks: ch,
+		closed: closed,
+	}
+}
+
+func (c *cancelableReader) Read(p []byte) (int, error) {
+	if len(c.buf) > 0 {
+		n := copy(p, c.buf)
+		c.buf = c.buf[n:]
+		if len(c.buf) == 0 && c.pending != nil {
+			err := c.pending
+			c.pending = nil
+			return n, err
+		}
+		return n, nil
+	}
+	if c.pending != nil {
+		err := c.pending
+		c.pending = nil
+		return 0, err
+	}
+	select {
+	case <-c.ctx.Done():
+		return 0, io.EOF
+	case <-c.closed:
+		return 0, io.EOF
+	case chunk, ok := <-c.chunks:
+		if !ok {
+			return 0, io.EOF
+		}
+		if len(chunk.data) == 0 {
+			if chunk.err != nil {
+				return 0, chunk.err
+			}
+			return 0, nil
+		}
+		n := copy(p, chunk.data)
+		if n < len(chunk.data) {
+			c.buf = chunk.data[n:]
+			c.pending = chunk.err
+			return n, nil
+		}
+		return n, chunk.err
+	}
+}
+
+func (c *cancelableReader) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return nil
 }
 
 // BindPolicy decides whether an HTTP bind is permitted (issue #282).

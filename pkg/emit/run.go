@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/exempt"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
@@ -224,6 +225,13 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	if scope.Kubeconfig != "" && (kubeconfigDir != "" || values.IsSet("kubeconfig-dir")) {
 		return usageError(stderr, cfg.Name, errors.New("--kubeconfig and --kubeconfig-dir are mutually exclusive"))
 	}
+	googleAuth := strings.TrimSpace(values.String("google-auth"))
+	if err := cloud.ValidateGoogleAuth(googleAuth); err != nil {
+		return usageError(stderr, cfg.Name, err)
+	}
+	if googleAuth != "" {
+		ctx = cloud.WithGoogleAuth(ctx, googleAuth)
+	}
 
 	// Exemptions load before the scan starts and are bound to one
 	// instant, so every finding in a run is judged against the same
@@ -252,19 +260,26 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 		if scope.Kubeconfig != "" || kubeconfigDir != "" || scope.Context != "" || contextsRaw != "" {
 			return usageError(stderr, cfg.Name, fmt.Errorf("--kubeconfig and --context do not apply: this call's cluster is %q", sel.Target.Name))
 		}
-	} else if kubeconfigDir == "" && contextsRaw == "" {
-		ctx = kube.WithSelection(ctx, kube.Selection{Kubeconfig: scope.Kubeconfig, Context: scope.Context})
 	}
 
 	if kubeconfigDir != "" || contextsRaw != "" {
 		return runFleet(ctx, cfg, scope, values, positionals, stdin, stdout, stderr, format, timeout, exemptions, kubeconfigDir, contextsRaw, concurrency, now)
 	}
 
-	// The deadline starts here, before the Writer exists, so that the
-	// caller access reviews a filtering Writer makes are bounded by
-	// --timeout like every other call the invocation makes (§4.2).
+	// The deadline starts here, before context resolution and the Writer exist,
+	// so kubeconfig-free cluster resolution and caller access reviews share the
+	// same single --timeout budget as the check itself (§4.2).
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	if kube.SelectionFrom(ctx).Target == nil {
+		sel, usedCloud, err := kube.ResolveContextSelection(ctx, scope.Kubeconfig, scope.Context)
+		if err != nil && usedCloud {
+			fmt.Fprintf(stderr, "%s: %s\n", cfg.Name, formatTargetError(ctx, timeout, err))
+			return ExitRuntime
+		}
+		ctx = kube.WithSelection(ctx, sel)
+	}
 
 	var writerOpts []WriterOption
 	if exemptions != nil {
@@ -485,9 +500,11 @@ func runFleet(
 	concurrency int,
 	now func() time.Time,
 ) int {
-	targets, err := kube.ResolveFleetTargets(scope.Kubeconfig, kubeconfigDir, contextsRaw)
+	rctx, rcancel := context.WithTimeout(ctx, timeout)
+	targets, err := kube.ResolveFleetTargetsContext(rctx, scope.Kubeconfig, kubeconfigDir, contextsRaw)
+	rcancel()
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %s\n", cfg.Name, MaskString(err.Error()))
+		fmt.Fprintf(stderr, "%s: %s\n", cfg.Name, formatTargetError(rctx, timeout, err))
 		return ExitRuntime
 	}
 
@@ -508,10 +525,15 @@ func runFleet(
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			targetCtx := kube.WithSelection(ctx, kube.Selection{
-				Kubeconfig: t.Kubeconfig,
-				Context:    t.Context,
-			})
+			var targetCtx context.Context
+			if t.Target != nil {
+				targetCtx = kube.WithTarget(ctx, *t.Target)
+			} else {
+				targetCtx = kube.WithSelection(ctx, kube.Selection{
+					Kubeconfig: t.Kubeconfig,
+					Context:    t.Context,
+				})
+			}
 			targetCtx, cancel := context.WithTimeout(targetCtx, timeout)
 			defer cancel()
 

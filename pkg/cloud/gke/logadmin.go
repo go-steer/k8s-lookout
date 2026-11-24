@@ -46,6 +46,10 @@ type logadminLister struct {
 // Close — the client is gRPC-backed and outlives the call that dialed
 // it (issue #382). Provider.dialLogadmin is the seam that registers it.
 func newLogadminLister(ctx context.Context, project string) (*logadminLister, error) {
+	if err := grpcCredentialProxyErr(ctx); err != nil {
+		return nil, err
+	}
+	ctx = withGRPCClient(ctx)
 	client, err := logadmin.NewClient(ctx, project, clientOptions(ctx)...)
 	if err != nil {
 		return nil, err

@@ -44,11 +44,14 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"k8s.io/client-go/rest"
 
 	"github.com/go-steer/k8s-lookout/pkg/checks"
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 	"github.com/go-steer/k8s-lookout/pkg/emit"
 	"github.com/go-steer/k8s-lookout/pkg/kube"
 )
@@ -72,6 +75,7 @@ type config struct {
 	// every tool invocation instead of exposed in MCP input schemas.
 	kubeconfig     string
 	context        string
+	googleAuth     string
 	exemptions     string
 	store          string
 	report         string
@@ -88,7 +92,10 @@ type config struct {
 	clusters *Clusters
 	// localCluster is the canonical name of the cluster lookout runs in,
 	// the one cluster a Local command may target; "" when unknown.
-	localCluster string
+	localCluster   string
+	localClusterFn func(context.Context) string
+	localOnce      *sync.Once
+	localResolved  *string
 	// maxPerCluster caps one cluster's calls in flight; 0 derives it from
 	// the global limit and the size of the cluster set.
 	maxPerCluster int
@@ -96,6 +103,7 @@ type config struct {
 	// maxResponseBytes caps a successful tool result (#747); 0 means
 	// no cap. See fitResponse.
 	maxResponseBytes int
+	server           *mcp.Server
 }
 
 // WithLocalCluster names the cluster lookout runs in (project/location/
@@ -103,6 +111,30 @@ type config struct {
 // multi-cluster endpoint. Without it, Local commands are refused there.
 func WithLocalCluster(canonical string) Option {
 	return func(c *config) { c.localCluster = canonical }
+}
+
+// WithLocalClusterFunc resolves the local cluster name lazily on the first
+// invocation of a Local command so startup stays completely offline (#858).
+func WithLocalClusterFunc(fn func(context.Context) string) Option {
+	return func(c *config) { c.localClusterFn = fn }
+}
+
+// WithGoogleAuthMode pins --google-auth for every tool invocation (#858).
+func WithGoogleAuthMode(mode string) Option {
+	return func(c *config) { c.googleAuth = strings.TrimSpace(mode) }
+}
+
+func (c config) resolveLocalCluster(ctx context.Context) string {
+	if c.localCluster != "" {
+		return c.localCluster
+	}
+	if c.localClusterFn == nil || c.localOnce == nil || c.localResolved == nil {
+		return ""
+	}
+	c.localOnce.Do(func() {
+		*c.localResolved = c.localClusterFn(ctx)
+	})
+	return *c.localResolved
 }
 
 // WithMaxConcurrencyPerCluster caps each cluster's calls in flight on a
@@ -202,7 +234,14 @@ func WithMaxConcurrency(n int) Option {
 // at construction time. WithTools narrows that to a profile or an
 // explicit list (issue #280).
 func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
-	cfg := config{maxConcurrency: defaultMaxConcurrentCalls, maxResponseBytes: DefaultMaxResponseBytes}
+	var localOnce sync.Once
+	var localResolved string
+	cfg := config{
+		maxConcurrency:   defaultMaxConcurrentCalls,
+		maxResponseBytes: DefaultMaxResponseBytes,
+		localOnce:        &localOnce,
+		localResolved:    &localResolved,
+	}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -214,6 +253,7 @@ func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
 		cfg.perCluster = newCallerLimit(cfg.maxConcurrency)
 	}
 	server := mcp.NewServer(&mcp.Implementation{Name: "lookout", Version: version}, nil)
+	cfg.server = server
 	multi := cfg.clusters != nil
 	if multi {
 		server.AddTool(listClustersTool(), listClustersHandler(cfg, sem))
@@ -338,6 +378,9 @@ func pinnedArgs(c checks.Command, cfg config) []string {
 	if cfg.context != "" {
 		out = append(out, "--context="+cfg.context)
 	}
+	if cfg.googleAuth != "" {
+		out = append(out, "--google-auth="+cfg.googleAuth)
+	}
 	if cfg.exemptions != "" {
 		out = append(out, "--exemptions="+cfg.exemptions)
 	}
@@ -364,8 +407,42 @@ func pinnedArgs(c checks.Command, cfg config) []string {
 // rejects is exactly the thing an access log is for, and it would be
 // the one call shape invisible in the log if the argv error returned
 // early.
+func localClusterMismatch(ctx context.Context, c checks.Command, cfg config, entry clusterEntry) string {
+	if !c.Local {
+		return ""
+	}
+	localCluster := cfg.resolveLocalCluster(ctx)
+	if entry.canonical == localCluster {
+		return ""
+	}
+	where := "a cluster this server cannot identify"
+	if localCluster != "" {
+		where = localCluster
+	}
+	return fmt.Sprintf("lookout %s measures from where lookout runs, which is %s, not %s: its answer would describe the wrong network. lookout net probe-from probes from a pod inside the cluster", c.Name, where, entry.canonical)
+}
+
+func entryTarget(entry clusterEntry, restCfg *rest.Config) kube.Target {
+	name, proj, loc := entry.ref.Name, entry.ref.Project, entry.ref.Location
+	if proj == "" && entry.gkeID != nil {
+		name, proj, loc = entry.gkeID.Cluster, entry.gkeID.Project, entry.gkeID.Location
+	}
+	return kube.Target{
+		Name:     name,
+		Project:  proj,
+		Location: loc,
+		Config:   restCfg,
+	}
+}
+
 func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var cancelServe context.CancelFunc
+		ctx, cancelServe = bindServeContext(ctx, cfg.server)
+		defer cancelServe()
+		if cfg.googleAuth != "" {
+			ctx = cloud.WithGoogleAuth(ctx, cfg.googleAuth)
+		}
 		start := cfg.log.now()
 		remote := remoteAddrFromContext(ctx)
 		caller, cluster := "", ""
@@ -373,8 +450,9 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 			cfg.log.RecordFor(caller, cluster, c.MCPName, exit, start, len(text), remote)
 		}
 		toolError := func(msg string) *mcp.CallToolResult {
-			record(emit.ExitRuntime, msg)
-			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: msg}}}
+			masked := emit.MaskString(msg)
+			record(emit.ExitRuntime, masked)
+			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: masked}}}
 		}
 		// A workload caller (#701) arrived on the mTLS listener with a
 		// verified client certificate; the rules say what it may call.
@@ -402,6 +480,7 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 			// Records the call writes (triage status recorded_by, acks)
 			// name the workload.
 			ctx = kube.WithCallerName(ctx, caller)
+			ctx = withDynamicAllow(ctx, wl.allowsClusterID)
 		} else if cfg.google != nil {
 			// Read the caller from the request, not the context: the
 			// token is the one this HTTP request carried
@@ -457,12 +536,8 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 				}
 				endpoint = entry.ref.Endpoint
 			}
-			if c.Local && entry.canonical != cfg.localCluster {
-				where := "a cluster this server cannot identify"
-				if cfg.localCluster != "" {
-					where = cfg.localCluster
-				}
-				return toolError(fmt.Sprintf("lookout %s measures from where lookout runs, which is %s, not %s: its answer would describe the wrong network. lookout net probe-from probes from a pod inside the cluster", c.Name, where, entry.canonical)), nil
+			if msg := localClusterMismatch(ctx, c, cfg, entry); msg != "" {
+				return toolError(msg), nil
 			}
 			releaseCluster, ok := cfg.perCluster.acquireUpTo(entry.canonical, cfg.clusterLimit(entry.setSize))
 			if !ok {
@@ -485,12 +560,7 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 			if err != nil {
 				return toolError(fmt.Sprintf("lookout %s: cluster %s: %v", c.Name, entry.name, err)), nil
 			}
-			ctx = kube.WithTarget(ctx, kube.Target{
-				Name:     entry.ref.Name,
-				Project:  entry.ref.Project,
-				Location: entry.ref.Location,
-				Config:   restCfg,
-			})
+			ctx = kube.WithTarget(ctx, entryTarget(entry, restCfg))
 			// A command that labels what it stores by cluster (findings
 			// diff) is given the canonical name, which does not change
 			// with who is asking.

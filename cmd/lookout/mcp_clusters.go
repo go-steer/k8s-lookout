@@ -82,6 +82,9 @@ func multiClusterProblem(multi, googleMode bool, clusters, clustersFrom, kubecon
 		if googleMode && scopes.Kubeconfig {
 			return "--clusters-from=kubeconfig: " + gkeOnly
 		}
+		if googleMode && scopes.Auto && os.Getenv("KUBECONFIG") != "" {
+			return "--clusters-from=auto with KUBECONFIG set: " + gkeOnly
+		}
 	}
 	return ""
 }
@@ -93,7 +96,7 @@ func multiClusterProblem(multi, googleMode bool, clusters, clustersFrom, kubecon
 // kubeconfig's current context, and a probe from a laptop is from no
 // cluster at all.
 func localClusterName(ctx context.Context) string {
-	if os.Getenv("KUBERNETES_SERVICE_HOST") == "" {
+	if os.Getenv("KUBERNETES_SERVICE_HOST") == "" || cloud.IsInjectedGoogleAuth(ctx) || cloud.HasCredentialProxy() {
 		return ""
 	}
 	p, err := cloud.New(ctx, cloud.Config{})
@@ -111,9 +114,11 @@ func localClusterName(ctx context.Context) string {
 	return id.Project() + "/" + id.Location() + "/" + id.Cluster()
 }
 
-// startClusters resolves the fleet and, outside Google-token mode,
-// discovers it, logging what each scope found. It returns nil and the
-// exit code on failure.
+// startClusters constructs the multi-cluster directory without performing
+// network discovery at startup so `initialize` and `tools/list` work
+// completely offline before any cluster is reachable (#858). Discovery runs
+// lazily on the first `k8s_list_clusters` or tool call, logging its scope
+// notes once to stderr.
 func startClusters(ctx context.Context, spec fleet.Spec, perCaller bool, rediscover time.Duration, defaultCluster, defaultProject string, stderr io.Writer) (*mcpserver.Clusters, int) {
 	src, err := fleet.Resolve(ctx, spec)
 	if err != nil {
@@ -122,18 +127,19 @@ func startClusters(ctx context.Context, spec fleet.Spec, perCaller bool, redisco
 	}
 	dir := mcpserver.NewClusters(src, perCaller, rediscover)
 	dir.SetDefaults(defaultCluster, defaultProject)
-	scopes, n, err := dir.Start(ctx)
-	for _, note := range (fleet.Result{Scopes: scopes}).Notes() {
-		fmt.Fprintf(stderr, "lookout mcp: multi-cluster: %s\n", note)
-	}
-	if err != nil {
-		fmt.Fprintf(stderr, "lookout mcp: %v\n", err)
-		return nil, 1
-	}
 	if perCaller {
 		fmt.Fprintf(stderr, "lookout mcp: multi-cluster: each caller's clusters are discovered with their own token from %s\n", strconv.Quote(dir.Describe()))
 	} else {
-		fmt.Fprintf(stderr, "lookout mcp: multi-cluster: serving %d cluster(s) from %s, rediscovered every %s\n", n, strconv.Quote(dir.Describe()), rediscover)
+		dir.SetOnFirstDiscover(func(scopes []fleet.ScopeResult, n int, derr error) {
+			for _, note := range (fleet.Result{Scopes: scopes}).Notes() {
+				fmt.Fprintf(stderr, "lookout mcp: multi-cluster: %s\n", note)
+			}
+			if derr != nil {
+				fmt.Fprintf(stderr, "lookout mcp: multi-cluster: initial discovery failed: %v\n", derr)
+				return
+			}
+			fmt.Fprintf(stderr, "lookout mcp: multi-cluster: serving %d cluster(s) from %s, rediscovered every %s\n", n, strconv.Quote(dir.Describe()), rediscover)
+		})
 	}
 	return dir, 0
 }

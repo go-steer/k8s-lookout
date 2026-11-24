@@ -18,6 +18,8 @@ import (
 	"context"
 
 	"k8s.io/client-go/rest"
+
+	"github.com/go-steer/k8s-lookout/pkg/cloud"
 )
 
 // The cluster a read-path invocation talks to is chosen once, by the
@@ -100,5 +102,11 @@ func SelectionFrom(ctx context.Context) Selection {
 func OptionsFrom(ctx context.Context) Options {
 	s := SelectionFrom(ctx)
 	ts, _ := CallerTokenFrom(ctx)
-	return Options{Kubeconfig: s.Kubeconfig, Context: s.Context, Target: s.Target, CallerToken: ts}
+	return Options{
+		Kubeconfig:      s.Kubeconfig,
+		Context:         s.Context,
+		Target:          s.Target,
+		CallerToken:     ts,
+		NoAutoInCluster: cloud.IsInjectedGoogleAuth(ctx) || cloud.HasCredentialProxy(),
+	}
 }
