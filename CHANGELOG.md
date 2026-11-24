@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-11-24
+
+**This release removes the in-tree leeway implementation and makes `lookout mcp` run unmodified inside a credential-less agent task.** BREAKING: the `topology-drift` and `compute-class` watch sources, their 23 `--topology-*` / `--compute-class-*` flags, `cmd/leeway`, the `LeewayPolicy` / `ClusterLeewayPolicy` CRDs and RBAC rules, and the eight `leeway.*` signal kinds are gone (#842); use [`github.com/go-steer/leeway`](https://github.com/go-steer/leeway) for placement-skew and ComputeClass rank posture. `lookout mcp` and the CLI gain injected Google auth and `CREDENTIAL_PROXY_URL` routing with no metadata-server or `kubectl` dependency, accept GKE resource paths as `cluster` everywhere, widen scope on demand, and answer `tools/list` with no network (#858). `lookout audit all` now runs `audit computeclass` and `audit ai` (#845). `lookout watch` gates `FailedScheduling` on autoscaler verdicts (#835), reads `events.k8s.io/v1` `Series` counts (#833), and adds opt-in `--settle` (#834) and hot-reloadable `--alert-excludes` (#836). Deployment manifests become composable Kustomize components with Helm parity; the top-level `deploy-*` overlays and root `deploy/*.yaml` paths are deprecated but still shipped (#852).
+
 ### Added
 
 - **Injected Google auth, `CREDENTIAL_PROXY_URL` routing, uniform GKE cluster references, lazy scope widening, offline `tools/list`, and prompt stdio `SIGTERM` exit (#858, refs go-steer/shipmind#127, go-steer/shipmind#137).**
