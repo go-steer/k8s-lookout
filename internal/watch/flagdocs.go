@@ -16,8 +16,24 @@ package watch
 
 import (
 	"flag"
+	"slices"
 	"time"
 )
+
+// KnownSources returns the active `--sources` names in §7.2 table order.
+func KnownSources() []string {
+	return slices.Clone(knownSources)
+}
+
+// AutoSources returns the `--sources=auto` candidate names in §7.2 table order.
+func AutoSources() []string {
+	return slices.Clone(autoSourceNames)
+}
+
+// KnownSinks returns the valid `--sink` names (`core-agent`, `webhook`, `ax`).
+func KnownSinks() []string {
+	return []string{sinkCoreAgent, sinkWebhook, sinkAX}
+}
 
 // FlagDoc documents one `lookout watch` flag for generated reference
 // surfaces (the docs site's sentinel page, dev/tools/gen-site-docs).

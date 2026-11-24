@@ -323,3 +323,149 @@
     max-width: calc(var(--sl-content-width) + 2 * var(--sl-content-pad-x));
   }
 }
+
+/* --- Mermaid diagrams ---
+ * Rendered SVG on top, expand button, collapsed source below. Set up
+ * by src/scripts/mermaid-render.js at page load. */
+.mermaid-block {
+  margin: 1.5rem 0;
+}
+.mermaid-rendered {
+  position: relative;
+  padding: 1.25rem 1rem;
+  background: var(--sl-color-gray-7);
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+.mermaid-rendered .mermaid-svg {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 10rem;
+  width: 100%;
+}
+.mermaid-rendered svg {
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+  display: block;
+}
+
+/* Expand button — small icon-only affordance in the top-right. */
+.mermaid-expand {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  color: var(--sl-color-gray-3);
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 0.3rem;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    background-color 120ms ease,
+    border-color 120ms ease;
+  z-index: 2;
+}
+.mermaid-expand:hover,
+.mermaid-expand:focus-visible {
+  color: var(--sl-color-accent-high);
+  background: var(--sl-color-accent-low);
+  border-color: var(--sl-color-accent);
+}
+.mermaid-expand svg {
+  flex: 0 0 auto;
+}
+
+details.mermaid-source {
+  margin-top: 0.5rem;
+}
+details.mermaid-source > summary {
+  cursor: pointer;
+  color: var(--sl-color-text-accent);
+  font-size: 0.875rem;
+  padding: 0.25rem 0;
+  user-select: none;
+}
+details.mermaid-source > summary:hover {
+  color: var(--sl-color-accent-high);
+  text-decoration: underline;
+}
+details.mermaid-source[open] > summary {
+  margin-bottom: 0.5rem;
+}
+
+/* Modal overlay — full viewport, semi-transparent backdrop.
+ * `hidden` attribute toggles display; JS handles focus + Esc close. */
+.mermaid-modal[hidden] {
+  display: none;
+}
+.mermaid-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(15, 23, 33, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem;
+  backdrop-filter: blur(2px);
+}
+.mermaid-modal-surface {
+  position: relative;
+  width: 99vw;
+  height: 99vh;
+  max-width: 99vw;
+  max-height: 99vh;
+  background: #ffffff;
+  border: 1px solid var(--sl-color-hairline-shade);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  box-shadow: 0 20px 60px rgba(15, 23, 33, 0.4);
+}
+.mermaid-modal-close {
+  align-self: flex-end;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--sl-color-gray-2);
+  background: transparent;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 0.375rem;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease;
+}
+.mermaid-modal-close:hover,
+.mermaid-modal-close:focus-visible {
+  color: var(--sl-color-accent-high);
+  border-color: var(--sl-color-accent);
+}
+.mermaid-modal-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem;
+}
+.mermaid-modal-stage svg {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+}

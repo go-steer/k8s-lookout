@@ -20,6 +20,47 @@ snapshot pass (`lookout audit all`), a four-layer policy engine, and
 stateful diffing (`lookout findings diff`) so scheduled runs only page on
 newly introduced violations.
 
+## Posture pipeline
+
+```mermaid
+flowchart TB
+  subgraph Pol["Four-Layer Policy Resolution (pkg/policy — inspect via lookout audit policy)"]
+    direction TB
+    L1["Layer 1: Detector defaults (enabled=true, default severity &amp; params)"]
+    L2["Layer 2: Built-in --profile (default | strict | onboarding | gke-autopilot)"]
+    L3["Layer 3: YAML --policy file (checks: &lt;kind&gt; / &lt;kind&gt;/&lt;reason&gt;, params, system_namespaces, min_severity)"]
+    L4["Layer 4: CLI flags (--only, --skip, --min-severity, --set)"]
+    L1 --> L2 --> L3 --> L4
+  end
+
+  Snap["Shared Lazy Snapshot (audit.Snapshot — lookout audit all)<br/>Lists Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Pods (trimmed),<br/>Services, Namespaces, Nodes, ServiceAccounts, LimitRanges, PDBs, HPAs,<br/>Ingresses, NetworkPolicies, Roles/Bindings, ResourceQuotas, Webhooks at most once"]
+
+  subgraph Det["Posture Detectors (pkg/checks/audit/*)"]
+    direction LR
+    K8sDet["Snapshot-Backed Cluster Detectors<br/>audit workloads | audit hardening | audit rbac |<br/>audit netpol | audit namespaces | audit ai |<br/>audit computeclass (leeway.DecodeComputeClass + dynamic CRD) |<br/>audit upgrades (Snapshot + pkg/cloud.Provider)"]
+    NonSnapDet["Cloud &amp; File Detectors (no Snapshot reads)<br/>audit cluster (pkg/cloud.Provider)<br/>audit exemptions (--exemptions file)"]
+  end
+
+  FP["Class Identity: engine.PostureFingerprint<br/>Fingerprint(kind, reason, objectClass, &quot;&quot;)<br/>Detector kind + uncanonicalized reason + empty zone"]
+
+  Gate["Writer Policy &amp; Exemptions (emit.Writer)<br/>1. WithPolicy: withhold disabled / below-min_severity checks &amp; apply severity overrides → policy=&lt;name&gt; suppressed=&lt;n&gt;<br/>2. WithExemptions (pkg/exempt, --exemptions): annotate exempt=true + exempt_reason + exempt_expires (never drops) → exempt=&lt;n&gt;"]
+
+  subgraph Diff["Stateful Regression Tracking (pkg/checks/findings + SQLite finding_state)"]
+    direction LR
+    FDiff["lookout findings diff (--store, --report, --transitions)<br/>Keys on instance subject_key; emits new | ongoing | escalated | resolved | suppressed"]
+    FAck["lookout findings ack (--store, --for / --clear)<br/>Sets ack_until + ack_by window on open finding_state row"]
+  end
+
+  L4 -->|"params, --set &amp; system_namespaces"| Det
+  Snap --> K8sDet
+  K8sDet --> FP
+  NonSnapDet --> FP
+  FP --> Gate
+  L4 -->|"enablement &amp; severity"| Gate
+  Gate -->|"logfmt / json / --format=findings"| FDiff
+  FAck <-->|"finding_state"| FDiff
+```
+
 ## 1. Run the single-pass sweep (`lookout audit all`)
 
 Point `lookout audit all -A` at your current kubeconfig (or pass
@@ -140,15 +181,19 @@ pipe the sweep into [`lookout findings diff`](/reference/findings-diff/):
 
 ```sh
 lookout audit all -A --policy=policy.yaml --exemptions=exemptions.yaml \
-  | lookout findings diff --store=/var/lib/lookout/lookout.db --report=- --cluster=prod-east
+  | lookout findings diff --store=/var/lib/lookout/lookout.db --report=- \
+      --cluster=prod-east --transitions=new,escalated,resolved
 ```
 
-`findings diff` compares each finding's deterministic posture `fingerprint`
-against the SQLite baseline store and emits only **transitions** (`new`,
-`escalated`, `resolved`), while [`lookout findings ack`](/reference/findings-ack/)
-suppresses a finding for a bounded review window. To export the raw
-finding stream as a JSON array for a fleet ledger or compliance pipeline,
-pass `--format=findings`.
+`findings diff` compares each finding's instance-grain `subject_key` against
+`finding_state` in SQLite (carrying the class-level `PostureFingerprint` on
+the envelope for fleet rollup) and classifies every subject as `new`,
+`ongoing`, `escalated`, `resolved`, or `suppressed`; passing
+`--transitions=new,escalated,resolved` emits only state changes, while
+[`lookout findings ack`](/reference/findings-ack/) suppresses an open
+subject for a bounded review window. To export the raw finding stream as a
+JSON array for a fleet ledger or compliance pipeline, pass
+`--format=findings`.
 
 ## As an agent skill
 

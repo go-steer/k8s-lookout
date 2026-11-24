@@ -18,6 +18,70 @@ graph history: baseline snapshot stored (generation 3, 51 nodes, 62 edges) — -
 
 (Startup lines from a live validation drill.)
 
+## Who writes and reads each table
+
+A single `--store` SQLite file (`modernc.org/sqlite`, WAL mode) holds bounded telemetry tables alongside durable state tables (see `pkg/store`). The diagram below shows which mode writes and which mode reads every active table:
+
+```mermaid
+flowchart LR
+  subgraph Writers["Writers (store.Open — read/write)"]
+    direction TB
+    WDisp["lookout watch dispatcher<br/>Buffered non-blocking writer"]
+    WGraph["lookout watch --storm graph feed<br/>Snapshot ticker + informer deltas"]
+    WDist["lookout watch distiller<br/>(--distill-interval)"]
+    WRecov["lookout watch recovery<br/>(ResolveTriageStatus)"]
+    WAX["lookout watch --sink=ax<br/>(internal/axsink)"]
+    WTriage["lookout triage status /<br/>MCP k8s_triage_status"]
+    WDiff["lookout findings diff &amp;<br/>lookout findings ack"]
+  end
+
+  subgraph DB["SQLite Tables (pkg/store)"]
+    direction TB
+    subgraph Pruned["Bounded by --store-ttl &amp; --store-max-mb"]
+      Tocc[("occurrences<br/>Post-dedup signals + route outcome")]
+      Tsnap[("graph_snapshots<br/>Epoch-stamped LKGH blobs<br/>(newest snapshot kept)")]
+      Tchg[("graph_changes<br/>Epoch-stamped deltas + FieldChanges")]
+      Tsink[("sink_sessions<br/>(cluster, incident_key) → AX session<br/>(TTL-pruned)")]
+    end
+    subgraph Durable["Durable State (exempt from TTL/size prune)"]
+      Tfact[("memory_facts<br/>Distilled recurrence facts")]
+      Ttri[("triage_status<br/>Agent diagnosis, severity_override,<br/>recorded_by, resolved lifecycle")]
+      Tfnd[("finding_state<br/>Open subject_key rows + ack_until<br/>(resolved rows deleted on diff)")]
+    end
+  end
+
+  subgraph Readers["Readers (in-process, store.OpenRead, or read/write CLI)"]
+    direction TB
+    RDist["lookout watch distiller<br/>(store.Recent)"]
+    RFact["pkg/memory.FactReader<br/>(store.Facts query API)"]
+    RAX["lookout watch --sink=ax<br/>(reopen session across restarts)"]
+    RRoute["lookout watch triageOverrides<br/>(refine per-incident severity)"]
+    RHist["triage radius --at &amp;<br/>triage changes (--at)<br/>(store.OpenRead: GraphAt + GraphChanges)"]
+    RScan["health --store, bundle --store,<br/>triage status (read mode)<br/>(store.OpenRead + MCP caller Visibility)"]
+    RDiff["findings diff (FindingStates via store.Open) &amp;<br/>findings ack (row read-back via store.Open)"]
+  end
+
+  WDisp -->|"Record"| Tocc
+  WGraph -->|"PutGraphSnapshot"| Tsnap
+  WGraph -->|"RecordGraphChange"| Tchg
+  WDist <-->|"UpsertFact (dedupe on conflict)"| Tfact
+  WRecov -->|"flip to resolved"| Ttri
+  WTriage -->|"UpsertTriageStatus"| Ttri
+  WAX -->|"PutSinkSession"| Tsink
+  WDiff -->|"ReplaceFindingStates / AckFinding / UnackFinding"| Tfnd
+
+  Tocc --> RDist
+  Tsnap --> RHist
+  Tchg --> RHist
+  Tfact -.-> RFact
+  Tsink --> RAX
+  Ttri --> RRoute
+  Ttri --> RScan
+  Tfnd --> RDiff
+```
+
+*(Schema migrations `v7` and `v8` — `leeway_alert_state` and `leeway_baseline` — are retired in-place after `#842` so existing stores upgrade cleanly through `schema_version`, and are neither written nor read by `lookout`.)*
+
 ## What's in it
 
 - **Occurrences** — every post-dedup signal, including info-severity
