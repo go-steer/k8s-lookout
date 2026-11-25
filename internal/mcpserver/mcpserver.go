@@ -98,8 +98,9 @@ type config struct {
 	localResolved  *string
 	// maxPerCluster caps one cluster's calls in flight; 0 derives it from
 	// the global limit and the size of the cluster set.
-	maxPerCluster int
-	perCluster    *callerLimit
+	maxPerCluster   int
+	queuePerCluster *bool
+	perCluster      *callerLimit
 	// maxResponseBytes caps a successful tool result (#747); 0 means
 	// no cap. See fitResponse.
 	maxResponseBytes int
@@ -147,6 +148,29 @@ func WithMaxConcurrencyPerCluster(n int) Option {
 			c.maxPerCluster = n
 		}
 	}
+}
+
+// WithQueuePerCluster configures whether non-HTTP calls past a cluster's
+// per-cluster concurrency limit wait for a slot (respecting ctx) instead
+// of failing fast (#867). Serve enables queueing automatically on the
+// single-caller stdio transport unless explicitly disabled here; HTTP
+// listeners always fail fast regardless of this option so one slow
+// cluster cannot wedge a shared multi-tenant endpoint.
+func WithQueuePerCluster(enabled bool) Option {
+	return func(c *config) {
+		b := enabled
+		c.queuePerCluster = &b
+	}
+}
+
+func (c config) queuesPerCluster(ctx context.Context) bool {
+	if isHTTPRequest(ctx) {
+		return false
+	}
+	if c.queuePerCluster != nil {
+		return *c.queuePerCluster
+	}
+	return isStdioServer(c.server)
 }
 
 // clusterLimit is the per-cluster cap for a set of n clusters.
@@ -258,7 +282,8 @@ func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
 	if multi {
 		server.AddTool(listClustersTool(), listClustersHandler(cfg, sem))
 	}
-	for _, c := range Advertised(reg, cfg.tools) {
+	flags := ServerFlags{Exemptions: cfg.exemptions, Store: cfg.store}
+	for _, c := range AdvertisedFor(reg, cfg.tools, flags) {
 		server.AddTool(&mcp.Tool{
 			Name:        c.MCPName,
 			Description: toolDescription(c),
@@ -294,12 +319,26 @@ func New(reg *checks.Registry, version string, opts ...Option) *mcp.Server {
 // which only EnablePrivileged does: the nil "everything" selection
 // leaves it out, and ResolveTools never puts it in.
 func Advertised(reg *checks.Registry, tools map[string]bool) []checks.Command {
+	return advertised(reg, tools, nil)
+}
+
+// AdvertisedFor is Advertised filtered by the operator's server-scoped
+// path flags: tools declaring checks.Command.MCPRequiresServerFlag are
+// omitted when their required flag is unset (#867).
+func AdvertisedFor(reg *checks.Registry, tools map[string]bool, flags ServerFlags) []checks.Command {
+	return advertised(reg, tools, &flags)
+}
+
+func advertised(reg *checks.Registry, tools map[string]bool, flags *ServerFlags) []checks.Command {
 	var out []checks.Command
 	for _, c := range reg.All() {
 		if c.Hidden {
 			continue
 		}
 		if c.Privileged && !tools[c.MCPName] {
+			continue
+		}
+		if flags != nil && !flags.satisfies(c) {
 			continue
 		}
 		if tools != nil && !tools[c.MCPName] {
@@ -519,6 +558,8 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 						entry, err = cfg.clusters.Choose(ctx, caller, picked)
 					}
 				} else if len(choice.candidates) > 0 && clientCanBeAsked(req.Session) {
+					cfg.log.record(callRecord{caller: caller, tool: c.MCPName, exit: emit.ExitData,
+						start: start, bytes: 0, remote: remote, elicit: clusterProperty})
 					return askForCluster(c.Name, choice), nil
 				}
 			}
@@ -539,10 +580,21 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 			if msg := localClusterMismatch(ctx, c, cfg, entry); msg != "" {
 				return toolError(msg), nil
 			}
-			releaseCluster, ok := cfg.perCluster.acquireUpTo(entry.canonical, cfg.clusterLimit(entry.setSize))
-			if !ok {
-				return toolError(fmt.Sprintf("lookout %s: cluster %s already has %d calls in flight on this endpoint; retry when one finishes",
-					c.Name, entry.name, cfg.clusterLimit(entry.setSize))), nil
+			var releaseCluster func()
+			limit := cfg.clusterLimit(entry.setSize)
+			if cfg.queuesPerCluster(ctx) {
+				var err error
+				releaseCluster, err = cfg.perCluster.waitAcquireUpTo(ctx, entry.canonical, limit)
+				if err != nil {
+					return toolError("lookout " + c.Name + ": " + err.Error()), nil
+				}
+			} else {
+				var ok bool
+				releaseCluster, ok = cfg.perCluster.acquireUpTo(entry.canonical, limit)
+				if !ok {
+					return toolError(fmt.Sprintf("lookout %s: cluster %s already has %d calls in flight on this endpoint; retry when one finishes",
+						c.Name, entry.name, limit)), nil
+				}
 			}
 			defer releaseCluster()
 			// Each cluster's store and report are its own files, named the
@@ -615,6 +667,7 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 		var stdout, stderr bytes.Buffer
 		rc := c.RunConfig(&stdout, &stderr)
 		rc.Stdin = errReader{}
+		rc.OmitHelpHint = true
 		switch code := emit.Run(ctx, rc, fullArgs); code {
 		case emit.ExitData:
 			// Cut an oversize answer here, at a line boundary with the
@@ -628,7 +681,7 @@ func handler(c checks.Command, cfg config, sem chan struct{}) mcp.ToolHandler {
 				Content: []mcp.Content{&mcp.TextContent{Text: text}},
 			}, nil
 		case emit.ExitUsage:
-			msg := diagnostics(c, &stderr)
+			msg := mcpUsageDiagnostics(c, &stderr)
 			record(emit.ExitUsage, msg)
 			return nil, invalidParams(msg)
 		default: // emit.ExitRuntime

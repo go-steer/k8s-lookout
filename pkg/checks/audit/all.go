@@ -34,11 +34,13 @@ import (
 // Namespaces) are fetched at most once.
 func AllCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:           "audit all",
-		MCPName:        "k8s_audit_all",
-		MCPProfiles:    []string{"audit"},
-		TimeoutDefault: 60 * time.Second,
-		Summary:        "Run every posture detector in one pass over a shared cluster snapshot: workload availability and rollout safety (`audit workloads`), container and Pod Security hardening (`audit hardening`), RBAC over-permission (`audit rbac`), NetworkPolicy coverage (`audit netpol`), namespace onboarding and quota hygiene (`audit namespaces`), provider cluster configuration (`audit cluster`), upgrade readiness (`audit upgrades`), ComputeClass and zone placement (`audit computeclass`), and AI workload exposure (`audit ai`), plus exemption hygiene (`audit exemptions`) when --exemptions is given. Shared Kubernetes resources are listed at most once across all detectors; each finding carries check=<subcommand>. Scope with --namespace or -A.",
+		Name:                    "audit all",
+		MCPName:                 "k8s_audit_all",
+		MCPProfiles:             []string{"audit"},
+		MCPDefaultAllNamespaces: true,
+		InapplicableCommonFlags: []string{"workload"},
+		TimeoutDefault:          60 * time.Second,
+		Summary:                 "Run every posture detector in one pass over a shared cluster snapshot: workload availability and rollout safety (`audit workloads`), container and Pod Security hardening (`audit hardening`), RBAC over-permission (`audit rbac`), NetworkPolicy coverage (`audit netpol`), namespace onboarding and quota hygiene (`audit namespaces`), provider cluster configuration (`audit cluster`), upgrade readiness (`audit upgrades`), ComputeClass and zone placement (`audit computeclass`), and AI workload exposure (`audit ai`), plus exemption hygiene (`audit exemptions`) when --exemptions is given. Shared Kubernetes resources are listed at most once across all detectors; each finding carries check=<subcommand>. Scope with --namespace or -A.",
 		Flags: append([]emit.FlagSpec{
 			skipSystemNamespacesFlag(),
 			perWorkloadFlag(),

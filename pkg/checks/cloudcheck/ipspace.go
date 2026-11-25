@@ -50,9 +50,10 @@ const (
 // IPSpaceCommand builds the `cloud ipspace` declaration around deps.
 func IPSpaceCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "cloud ipspace",
-		MCPName: "k8s_cloud_ipspace",
-		Summary: "Pod/Service/node CIDR utilization per subnet, judged: warning at 80%, critical at 95% — IP space is incompressible, an exhausted range fails the next node or pod block outright. Consumption rate/ETA lives in the sentinel's capacity source.",
+		Name:                    "cloud ipspace",
+		MCPName:                 "k8s_cloud_ipspace",
+		InapplicableCommonFlags: []string{"namespace", "A", "workload"},
+		Summary:                 "Pod/Service/node CIDR utilization per subnet, judged: warning at 80%, critical at 95% — IP space is incompressible, an exhausted range fails the next node or pod block outright. Consumption rate/ETA lives in the sentinel's capacity source.",
 		Flags: []emit.FlagSpec{
 			{Name: "all", Type: emit.FlagBool, Default: "false",
 				Help: "exploratory dump: emit every range regardless of utilization (info severity below 80%), sorted by pct descending"},

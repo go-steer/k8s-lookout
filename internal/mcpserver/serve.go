@@ -335,6 +335,18 @@ var (
 	stdioServerCtx   = map[*mcp.Server]context.Context{}
 )
 
+// isStdioServer reports whether server is currently being served over the
+// single-caller stdio transport via serveStdio.
+func isStdioServer(server *mcp.Server) bool {
+	if server == nil {
+		return false
+	}
+	stdioServerCtxMu.RLock()
+	_, ok := stdioServerCtx[server]
+	stdioServerCtxMu.RUnlock()
+	return ok
+}
+
 // bindServeContext ties an incoming stdio tool call's context to Serve's
 // signal context so SIGTERM aborts in-flight tool calls immediately rather
 // than waiting for the SDK's non-propagating IOTransport (#858). Keyed by
@@ -598,6 +610,7 @@ func validateLoopbackFlag(flag, addr string) error {
 }
 
 type remoteAddrKey struct{}
+type httpTransportKey struct{}
 
 func withRemoteAddr(ctx context.Context, addr string) context.Context {
 	return context.WithValue(ctx, remoteAddrKey{}, addr)
@@ -608,14 +621,25 @@ func remoteAddrFromContext(ctx context.Context) string {
 	return v
 }
 
+func withHTTPTransport(ctx context.Context) context.Context {
+	return context.WithValue(ctx, httpTransportKey{}, true)
+}
+
+func isHTTPRequest(ctx context.Context) bool {
+	v, _ := ctx.Value(httpTransportKey{}).(bool)
+	return v
+}
+
 const maxHTTPBodyBytes = 1 << 20 // 1 MiB
 
 func wrapHTTPHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxHTTPBodyBytes)
+		ctx := withHTTPTransport(r.Context())
 		if r.RemoteAddr != "" {
-			r = r.WithContext(withRemoteAddr(r.Context(), r.RemoteAddr))
+			ctx = withRemoteAddr(ctx, r.RemoteAddr)
 		}
+		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	})
 }

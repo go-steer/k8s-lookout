@@ -33,19 +33,31 @@ import (
 // `--profile=triage --list-tools` sees the actual number the model
 // pays on every turn, not an assurance that it went down.
 func ToolListing(reg *checks.Registry, tools map[string]bool) string {
-	return toolListing(reg, tools, false)
+	return toolListing(reg, tools, nil, false)
 }
 
 // MultiClusterToolListing is ToolListing for a multi-cluster endpoint
 // (#700): every schema carries the cluster argument, and
 // k8s_list_clusters is advertised too.
 func MultiClusterToolListing(reg *checks.Registry, tools map[string]bool) string {
-	return toolListing(reg, tools, true)
+	return toolListing(reg, tools, nil, true)
 }
 
-func toolListing(reg *checks.Registry, tools map[string]bool, multi bool) string {
+// ToolListingFor renders the advertised surface taking configured
+// server-scoped path flags into account (#867), matching what New
+// serves.
+func ToolListingFor(reg *checks.Registry, tools map[string]bool, flags ServerFlags, multi bool) string {
+	return toolListing(reg, tools, &flags, multi)
+}
+
+func toolListing(reg *checks.Registry, tools map[string]bool, flags *ServerFlags, multi bool) string {
 	var b strings.Builder
-	cmds := Advertised(reg, tools)
+	var cmds []checks.Command
+	if flags != nil {
+		cmds = AdvertisedFor(reg, tools, *flags)
+	} else {
+		cmds = Advertised(reg, tools)
+	}
 	total, count := 0, len(cmds)
 	if multi {
 		n := marshaledBytes(listClustersTool())

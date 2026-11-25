@@ -328,14 +328,18 @@ Flags:
                         Cloud Asset Inventory.
   --max-concurrency-per-cluster=<n>
                         cap each cluster's calls in flight, so one slow
-                        API server cannot hold every slot; a call past
-                        it is turned away at once. Default: the global
-                        limit (8) divided by the number of clusters, at
-                        least 2.
+                        API server cannot hold every slot; HTTP
+                        endpoints turn away calls past it at once, while
+                        stdio queues them until a slot opens or the call
+                        is canceled. Default: the global limit (8)
+                        divided by the number of clusters, at least 2.
   --exemptions=<path>   path to an exemption YAML file pinned for all
-                        MCP tool invocations.
+                        MCP tool invocations. k8s_audit_exemptions is
+                        advertised only when this flag is set.
   --store=<path>        path to a sentinel SQLite store pinned for MCP
                         tool invocations that read historical state.
+                        k8s_findings_diff is advertised only when this
+                        flag is set.
   --report=<path>       path to a findings report pinned for MCP tool
                         invocations that read one.
   --profile=<name>      advertise only one curated tool surface
@@ -367,26 +371,28 @@ Flags:
                         100000, about the 25k-token cap MCP clients
                         such as Claude Code apply; 0 disables). A
                         larger answer is cut at a finding-line
-                        boundary, keeping the first findings (the
-                        newest, for a timeline), and its summary line
-                        says so: findings= is what was returned,
+                        boundary, sorting worst-first by severity before
+                        cutting (or keeping the newest entries, for a
+                        timeline), and its summary line says so:
+                        findings= is what was returned,
                         response_truncated=<n> and
                         response_truncated_severity= count what was
-                        left out, and response_hint names the
-                        arguments that narrow the call (since only
-                        for tools that read a time window).
-                        k8s_list_clusters is cut the same way,
-                        keeping the first clusters and pointing at
-                        filter.
+                        left out, and response_hint names the accepted
+                        arguments that narrow the call (since only for
+                        tools that read a time window).
+                        k8s_list_clusters is cut the same way, keeping
+                        the first clusters and pointing at filter.
   --access-log=<path>   append one logfmt line per tool call:
                         ts, tool, exit code, duration, response
                         bytes (plus remote peer address on HTTP,
-                        and truncated=<n> when a result was cut).
-                        Created if absent, appended if not, mode 0600.
-                        Deliberately not the arguments or the response
-                        body — the log is an operational record, not a
-                        second copy of cluster data. Optional on
-                        loopback, mandatory off-host.
+                        truncated=<n> when a result was cut, and
+                        elicit=cluster when a call pauses to ask the
+                        client to pick a cluster). Created if absent,
+                        appended if not, mode 0600. Deliberately not
+                        the arguments or the response body — the log is
+                        an operational record, not a second copy of
+                        cluster data. Optional on loopback, mandatory
+                        off-host.
 
 Profiles:
 %s
@@ -624,7 +630,11 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "lookout mcp: %s\nRun 'lookout mcp --help' for usage.\n", problem)
 		return 2
 	}
-	selected, err := mcpserver.ResolveTools(reg, *profile, *tools)
+	serverFlags := mcpserver.ServerFlags{
+		Exemptions: *exemptions,
+		Store:      *store,
+	}
+	selected, err := mcpserver.ResolveToolsFor(reg, *profile, *tools, serverFlags)
 	if err != nil {
 		fmt.Fprintf(stderr, "lookout mcp: %v\nRun 'lookout mcp --help' for usage.\n", err)
 		return 2
@@ -637,11 +647,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if *listTools {
-		if multiCluster {
-			fmt.Fprint(stdout, mcpserver.MultiClusterToolListing(reg, selected))
-		} else {
-			fmt.Fprint(stdout, mcpserver.ToolListing(reg, selected))
-		}
+		fmt.Fprint(stdout, mcpserver.ToolListingFor(reg, selected, serverFlags, multiCluster))
 		return 0
 	}
 
@@ -728,6 +734,7 @@ func mcpMain(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		mcpserver.WithClusters(clusters),
 		mcpserver.WithLocalClusterFunc(localFn),
 		mcpserver.WithMaxConcurrencyPerCluster(*maxPerCluster),
+		mcpserver.WithQueuePerCluster(*listen == "" && *wf.listen == ""),
 		mcpserver.WithMaxResponseBytes(*maxResponseBytes),
 		mcpserver.WithTools(selected),
 		mcpserver.WithAccessLog(log),

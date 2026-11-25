@@ -208,6 +208,22 @@ reason. They are never silently empty.
   all of the global slots. The default is the global limit divided by the
   number of clusters, with a floor of 2; `--max-concurrency-per-cluster`
   overrides it.
+  - **Multi-tenant HTTP (`--listen` / `--mtls-listen`) fails fast:** a call
+    past a cluster's limit is turned away immediately (`calls in flight`) so
+    one slow cluster cannot pile up waiters and wedge a shared endpoint.
+  - **Single-caller stdio queues (amendment of 2026-11-25, #867):** an MCP
+    client spawning `lookout mcp` over stdio commonly fans out parallel tool
+    calls against one cluster in a single turn. Over stdio (no `--listen`
+    and no `--mtls-listen`), calls past a cluster's per-cluster limit wait
+    for a slot on that cluster while respecting `ctx.Done()` cancellation
+    and releasing slots on return or panic; other clusters remain
+    unaffected.
+- **Elicitation access logging (amendment of 2026-11-25, #867):** when a
+  stateful session pauses a tool call to emit `elicitation/create` for
+  cluster selection, `--access-log` immediately records a structured line
+  carrying `elicit=cluster` (with `exit=0`, `bytes=0`, and no arguments or
+  candidate lists) before waiting for the client's response, so stalled or
+  dropped elicitations are visible in the operational log.
 - **Stateless HTTP.** lookout keeps no per-session state, so the endpoint
   serves streamable HTTP with the SDK's `Stateless: true`. Any replica can
   answer any request, so the endpoint scales as a Deployment behind a

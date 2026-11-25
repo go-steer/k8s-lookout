@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -55,9 +56,13 @@ func WithMaxResponseBytes(n int) Option {
 // The cut is deliberate rather than arbitrary. A client that is handed
 // more than it accepts truncates mid-line or rejects the answer, and
 // the model never learns what it lost. Here the result loses whole
-// finding lines only, from the end that matters least: the tail for
-// most commands, which emit the worst first, and the head for a
-// checks.Command.NewestLast timeline, whose newest entries are last.
+// finding lines only, from the end that matters least: for most
+// commands, findings are stably sorted worst-first (critical, warning,
+// info, preserving each command's deterministic emission order within a
+// severity tier) before cutting from the tail so severe findings in
+// later namespaces survive truncation (#867); for a
+// checks.Command.NewestLast timeline, chronological order is preserved
+// and lines are dropped from the head so the newest entries survive.
 // The summary line is always kept and rewritten so the §4.2 contract
 // still holds on what is returned:
 //
@@ -106,6 +111,23 @@ func fitResponse(c checks.Command, args []string, out string, limit int) (string
 	}
 	hint := responseHint(c, args, total, total, limit)
 	budget := limit - len(sum.cut(total, total, total, all, hint))
+
+	if !c.NewestLast {
+		order := make([]int, total)
+		for i := range order {
+			order[i] = i
+		}
+		slices.SortStableFunc(order, func(a, b int) int {
+			return emit.SeverityRank(recs[a].severity) - emit.SeverityRank(recs[b].severity)
+		})
+		sortedLines := make([]string, total)
+		sortedRecs := make([]record, total)
+		for i, idx := range order {
+			sortedLines[i] = findings[idx]
+			sortedRecs[i] = recs[idx]
+		}
+		findings, recs = sortedLines, sortedRecs
+	}
 
 	keep, size := fitLines(findings, budget, c.NewestLast)
 	if keep == total {
@@ -357,16 +379,27 @@ func parseJSONObject(line string) ([]summaryPair, bool) {
 }
 
 // responseHint is the response_hint note: which end of the stream was
-// kept, why, and what would narrow the call. It names the MCP arguments
-// the model can pass (namespace and workload, which every tool takes,
-// and since for a command that declares checks.Command.UsesSince),
-// leaving out the ones this call has already narrowed by.
+// kept, why, and what would narrow the call. It names only the MCP
+// arguments this tool actually accepts (namespace, workload, and since
+// for a command that declares checks.Command.UsesSince), leaving out
+// the ones this call has already narrowed by.
 func responseHint(c checks.Command, args []string, kept, total, limit int) string {
-	end := "first"
+	end := "highest-severity"
 	if c.NewestLast {
 		end = "newest"
 	}
-	return keptHint(end, kept, total, "findings", limit, narrowing(c, args))
+	narrow := narrowing(c, args)
+	if narrow == "" && !hasNarrowingOption(c) {
+		return fmt.Sprintf("kept the %s %d of %d findings to fit the server's %d-byte response limit; this tool has no narrowing arguments",
+			end, kept, total, limit)
+	}
+	return keptHint(end, kept, total, "findings", limit, narrow)
+}
+
+func hasNarrowingOption(c checks.Command) bool {
+	return c.AcceptsCommonFlag("namespace") ||
+		c.AcceptsCommonFlag("workload") ||
+		(c.UsesSince && c.AcceptsCommonFlag("since"))
 }
 
 // keptHint is the wording every response_hint shares: what was kept,
@@ -383,9 +416,8 @@ func keptHint(end string, kept, total int, what string, limit int, narrow string
 }
 
 // narrowing lists the arguments that would shrink this call's answer.
-// since is offered only to a command that declares UsesSince: every
-// tool accepts the argument, but one that ignores it would return the
-// same oversize answer to a model that followed the hint (#756).
+// Only arguments the tool accepts on MCP are offered, and since is
+// offered only to a command that declares UsesSince (#756, #867).
 func narrowing(c checks.Command, args []string) string {
 	set := func(flag string) bool {
 		for _, a := range args {
@@ -404,13 +436,13 @@ func narrowing(c checks.Command, args []string) string {
 		}
 	}
 	var opts []string
-	if !set("namespace") && !set("workload") && !target {
+	if c.AcceptsCommonFlag("namespace") && !set("namespace") && !set("workload") && !target {
 		opts = append(opts, "namespace")
 	}
-	if !set("workload") && !target {
+	if c.AcceptsCommonFlag("workload") && !set("workload") && !target {
 		opts = append(opts, "workload")
 	}
-	if c.UsesSince {
+	if c.UsesSince && c.AcceptsCommonFlag("since") {
 		if set("since") {
 			opts = append(opts, "a shorter since")
 		} else {

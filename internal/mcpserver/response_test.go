@@ -176,7 +176,7 @@ func TestFitResponse_KeepsTheHeadOfAWorstFirstAnswer(t *testing.T) {
 			if want := "critical:0,warning:0,info:" + strconv.Itoa(dropped); f["response_truncated_severity"] != want {
 				t.Errorf("response_truncated_severity = %q, want %q", f["response_truncated_severity"], want)
 			}
-			if want := "kept the first " + strconv.Itoa(len(lines)) + " of 223 findings"; !strings.Contains(f["response_hint"], want) {
+			if want := "kept the highest-severity " + strconv.Itoa(len(lines)) + " of 223 findings"; !strings.Contains(f["response_hint"], want) {
 				t.Errorf("response_hint = %q, want it to say %q", f["response_hint"], want)
 			}
 			// Notes stay in place, ahead of the response_* keys.
@@ -367,7 +367,7 @@ func TestNarrowingHintIsTailoredToTheCall(t *testing.T) {
 // argument that would not help.
 func TestResponseHintWithNothingLeftToNarrow(t *testing.T) {
 	got := responseHint(fakeSpecCommand(), []string{"--namespace=prod", "Pod/api"}, 10, 50, 1000)
-	if want := "kept the first 10 of 50 findings to fit the server's 1000-byte response limit; the call already uses every argument that would narrow it"; got != want {
+	if want := "kept the highest-severity 10 of 50 findings to fit the server's 1000-byte response limit; the call already uses every argument that would narrow it"; got != want {
 		t.Errorf("responseHint = %q, want %q", got, want)
 	}
 }

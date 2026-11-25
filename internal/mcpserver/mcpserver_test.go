@@ -282,9 +282,16 @@ func wantInvalidParams(t *testing.T, err error, msgFragment string) {
 func TestCallTool_UsageErrorIsInvalidParams(t *testing.T) {
 	cs := connect(t, New(testRegistry(t), "test"))
 	// --since must not be negative: rejected by the shared §4.2
-	// parser inside emit.Run (exit 2), not by the schema layer.
+	// parser inside emit.Run (exit 2), not by the schema layer. On MCP
+	// the diagnostic names the MCP property and omits the CLI --help hint.
 	_, err := callTool(t, cs, "k8s_triage_demo", map[string]any{"since": "-5s"})
-	wantInvalidParams(t, err, "--since must not be negative")
+	wantInvalidParams(t, err, "since must not be negative")
+	if strings.Contains(err.Error(), "--since") {
+		t.Errorf("MCP usage error should use MCP property name, not --since: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "--help") {
+		t.Errorf("MCP usage error must omit CLI --help trailer: %q", err.Error())
+	}
 }
 
 func TestCallTool_UnknownArgumentIsInvalidParams(t *testing.T) {

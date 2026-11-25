@@ -126,9 +126,10 @@ const defaultOrphanMinAge = 24 * time.Hour
 // OrphansCommand builds the `cloud orphans` declaration around deps.
 func OrphansCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "cloud orphans",
-		MCPName: "k8s_cloud_orphans",
-		Summary: "Billing-active cloud leftovers: unattached GCE disks and reserved-but-unused external static IPs older than --min-age, and forwarding rules/LBs routing to zero endpoints; opt-in --only=nodepools adds node pools with nodes but no workload pods — cost and hygiene sweep, not an incident read.",
+		Name:                    "cloud orphans",
+		MCPName:                 "k8s_cloud_orphans",
+		InapplicableCommonFlags: []string{"namespace", "A", "workload"},
+		Summary:                 "Billing-active cloud leftovers: unattached GCE disks and reserved-but-unused external static IPs older than --min-age, and forwarding rules/LBs routing to zero endpoints; opt-in --only=nodepools adds node pools with nodes but no workload pods — cost and hygiene sweep, not an incident read.",
 		Flags: []emit.FlagSpec{
 			{Name: "only", Type: emit.FlagString, Default: "disks,lbs,addresses",
 				Help: "resource classes to sweep, comma-separated: disks, lbs, addresses, nodepools (nodepools is opt-in: never in the default, judged on one observation, and reads cluster Nodes and Pods)"},

@@ -94,9 +94,10 @@ var (
 // KEDACommand builds the `lookout state keda` command.
 func KEDACommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "state keda",
-		MCPName: "k8s_keda_scalers",
-		Summary: "When a KEDA-scaled workload stops scaling — report every ScaledObject or ScaledJob whose target is gone, whose trigger authentication does not exist, or that KEDA itself reports not Ready. Silent, and cheap, on clusters without KEDA installed.",
+		Name:                    "state keda",
+		MCPName:                 "k8s_keda_scalers",
+		InapplicableCommonFlags: []string{"workload"},
+		Summary:                 "When a KEDA-scaled workload stops scaling — report every ScaledObject or ScaledJob whose target is gone, whose trigger authentication does not exist, or that KEDA itself reports not Ready. Silent, and cheap, on clusters without KEDA installed.",
 		Kinds: []checks.KindField{
 			checks.Kind("keda.missing_target", "the ScaledObject's scaleTargetRef names a Deployment or StatefulSet that does not exist — nothing is being scaled", emit.SeverityWarning),
 			checks.Kind("keda.missing_auth", "a trigger's authenticationRef names a TriggerAuthentication or ClusterTriggerAuthentication that does not exist — the scaler cannot read its metric", emit.SeverityWarning),

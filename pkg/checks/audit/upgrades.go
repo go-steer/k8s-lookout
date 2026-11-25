@@ -127,10 +127,11 @@ const unsupportedMinorGap = 3
 // it does not.
 func UpgradesCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:        "audit upgrades",
-		MCPName:     "k8s_audit_upgrades",
-		MCPProfiles: []string{"audit"},
-		Summary:     "Upgrade and patch readiness, read from the cloud provider and cluster upgrade-blocker catalogue: how far the control plane and its node pools are behind what the provider publishes (or --target-version), whether anything is set up to close that gap on its own — release channel, node auto-upgrade and auto-repair, a maintenance window, active maintenance exclusions, node images on the removed Docker runtime, and upgrade notifications — plus in-cluster upgrade blockers (deprecated/removed APIs in use, fail-closed admission webhooks on upgrade-critical paths, and PodDisruptionBudgets that allow zero disruptions during node drain). Without a provider capability or --target-version it reports an explicit unavailable rather than silence.",
+		Name:                    "audit upgrades",
+		MCPName:                 "k8s_audit_upgrades",
+		MCPProfiles:             []string{"audit"},
+		InapplicableCommonFlags: []string{"namespace", "A", "workload"},
+		Summary:                 "Upgrade and patch readiness, read from the cloud provider and cluster upgrade-blocker catalogue: how far the control plane and its node pools are behind what the provider publishes (or --target-version), whether anything is set up to close that gap on its own — release channel, node auto-upgrade and auto-repair, a maintenance window, active maintenance exclusions, node images on the removed Docker runtime, and upgrade notifications — plus in-cluster upgrade blockers (deprecated/removed APIs in use, fail-closed admission webhooks on upgrade-critical paths, and PodDisruptionBudgets that allow zero disruptions during node drain). Without a provider capability or --target-version it reports an explicit unavailable rather than silence.",
 		Flags: append([]emit.FlagSpec{
 			{
 				Name: "target-version",

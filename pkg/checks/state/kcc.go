@@ -47,9 +47,10 @@ const kccDeletionStuckThreshold = 5 * time.Minute
 // KCCCommand builds the `lookout state kcc` command.
 func KCCCommand(deps KCCDeps) checks.Command {
 	return checks.Command{
-		Name:    "state kcc",
-		MCPName: "k8s_state_kcc",
-		Summary: "When GCP resources managed by Config Connector stop reconciling or wedge on deletion — inspect *.cnrm.cloud.google.com objects for UpdateFailed, DependencyNotReady, ManagementConflict, DeleteFailed/stuck finalizers, and generation drift. Degrades explicitly on clusters without Config Connector installed.",
+		Name:                    "state kcc",
+		MCPName:                 "k8s_state_kcc",
+		InapplicableCommonFlags: []string{"workload"},
+		Summary:                 "When GCP resources managed by Config Connector stop reconciling or wedge on deletion — inspect *.cnrm.cloud.google.com objects for UpdateFailed, DependencyNotReady, ManagementConflict, DeleteFailed/stuck finalizers, and generation drift. Degrades explicitly on clusters without Config Connector installed.",
 		Kinds: []checks.KindField{
 			checks.Kind("kcc.not_ready", "a Config Connector object is not Ready, stuck terminating, or has an unreconciled spec generation", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind("kcc.unavailable", "no Config Connector (*.cnrm.cloud.google.com) CRDs are served by the cluster, so nothing was examined (§11: no coverage lies)", emit.SeverityInfo),

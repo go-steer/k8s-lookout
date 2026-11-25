@@ -15,8 +15,10 @@
 package mcpserver
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,10 +33,10 @@ import (
 // positional argument (commands declare at most one — checks.Command).
 const targetProperty = "target"
 
-// workloadProperty is the scoping property every tool declares (the
-// §4.2 --workload common flag). targetProperty is the property name on
-// the three tools that take a positional instead, and clients
-// generalize it to the other twenty — see argv (#232).
+// workloadProperty is the scoping property workload-scoped tools declare
+// (the §4.2 --workload common flag). targetProperty is the property name
+// on the tools that take a positional instead, and clients generalize it
+// to workload-scoped tools — see argv (#232).
 const workloadProperty = "workload"
 
 // durationPattern documents the Go duration syntax on duration-typed
@@ -79,10 +81,12 @@ func IsServerScopedFlag(flag string) bool {
 	return serverScopedFlags[flag]
 }
 
-// schemaSpecs returns the §4.2 common flags (plus, for graph-backed
-// commands, the §6.6 history flags) followed by the command's own
-// flags, minus serverScopedFlags: the complete flag surface behind a
-// tool's schema, in the order the surfaces document them.
+// schemaSpecs returns the §4.2 common flags applicable to c (plus, for
+// graph-backed commands, the §6.6 history flags) followed by the
+// command's own flags, minus serverScopedFlags and any common scope
+// flags c declares in InapplicableCommonFlags (#867): the complete
+// flag surface behind a tool's schema, in the order the surfaces
+// document them.
 func schemaSpecs(c checks.Command) []emit.FlagSpec {
 	raw := c.CommonFlags()
 	if c.GraphBacked {
@@ -91,9 +95,10 @@ func schemaSpecs(c checks.Command) []emit.FlagSpec {
 	raw = append(raw, c.Flags...)
 	specs := make([]emit.FlagSpec, 0, len(raw))
 	for _, s := range raw {
-		if !serverScopedFlags[s.Name] {
-			specs = append(specs, s)
+		if serverScopedFlags[s.Name] || !c.AcceptsCommonFlag(s.Name) {
+			continue
 		}
+		specs = append(specs, s)
 	}
 	return specs
 }
@@ -102,16 +107,19 @@ func schemaSpecs(c checks.Command) []emit.FlagSpec {
 // command's FlagSpecs and Positional declaration — the same metadata
 // that generates --help, so the two surfaces cannot drift (§4.4.3).
 // Every property is optional: omitted properties get the flag
-// defaults, exactly like an omitted CLI flag.
+// defaults, with one amended MCP-only exception (DESIGN.md §4.3
+// amendment, #867) — commands declaring MCPDefaultAllNamespaces
+// default all_namespaces to true when no scope property is supplied,
+// while CLI flag defaults stay unchanged.
 func inputSchema(c checks.Command) *jsonschema.Schema {
 	props := map[string]*jsonschema.Schema{}
 	for _, s := range schemaSpecs(c) {
-		props[propertyName(s.Name)] = flagSchema(s)
+		props[propertyName(s.Name)] = flagSchema(c, s)
 	}
 	if p := c.Positional; p != nil {
 		props[targetProperty] = &jsonschema.Schema{
 			Type:        "string",
-			Description: p.Meta + " — " + p.Doc,
+			Description: p.Meta + " — " + mcpWord(c, p.Doc),
 		}
 	}
 	return &jsonschema.Schema{Type: "object", Properties: props}
@@ -120,8 +128,16 @@ func inputSchema(c checks.Command) *jsonschema.Schema {
 // flagSchema maps one FlagSpec to its property schema. The FlagType
 // set is closed by design (pkg/emit): string→string, bool→boolean,
 // int→integer, duration→string with a Go-duration pattern note.
-func flagSchema(s emit.FlagSpec) *jsonschema.Schema {
-	out := &jsonschema.Schema{Description: s.Help}
+func flagSchema(c checks.Command, s emit.FlagSpec) *jsonschema.Schema {
+	desc := mcpWord(c, s.Help)
+	if c.MCPDefaultAllNamespaces && s.Name == "A" {
+		if c.AcceptsCommonFlag("workload") {
+			desc = "scan all namespaces (defaults to true on MCP when namespace and workload are omitted; pass all_namespaces=false to disable)"
+		} else {
+			desc = "scan all namespaces (defaults to true on MCP when namespace is omitted; pass all_namespaces=false to disable)"
+		}
+	}
+	out := &jsonschema.Schema{Description: desc}
 	switch s.Type {
 	case emit.FlagBool:
 		out.Type = "boolean"
@@ -130,11 +146,14 @@ func flagSchema(s emit.FlagSpec) *jsonschema.Schema {
 	case emit.FlagDuration:
 		out.Type = "string"
 		out.Pattern = durationPattern
-		out.Description = s.Help + ` (Go duration, e.g. "90s", "5m")`
+		out.Description = desc + ` (Go duration, e.g. "90s", "5m")`
 	default: // emit.FlagString; specs are validated at registration
 		out.Type = "string"
 	}
 	out.Default = defaultJSON(s)
+	if c.MCPDefaultAllNamespaces && s.Name == "A" {
+		out.Default = json.RawMessage("true")
+	}
 	return out
 }
 
@@ -155,12 +174,21 @@ func defaultJSON(s emit.FlagSpec) json.RawMessage {
 }
 
 // toolDescription composes the tool description as a micro-skill
-// (§4.4.1): the when-to-use Summary first, then the §4.2 output
-// contract as the tool result's shape, then the compact output-field
-// glossary. All of it comes from the same Command metadata as --help.
+// (§4.4.1): the when-to-use Summary first (with CLI flag tokens
+// rendered as MCP JSON property names), then any MCP default-scope
+// note, then the §4.2 output contract as the tool result's shape, then
+// the compact output-field glossary. All of it comes from the same
+// Command metadata as --help.
 func toolDescription(c checks.Command) string {
 	var b strings.Builder
-	b.WriteString(c.Summary)
+	b.WriteString(mcpWord(c, c.Summary))
+	if c.MCPDefaultAllNamespaces {
+		if c.AcceptsCommonFlag("workload") {
+			b.WriteString("\nDefault scope on MCP: all_namespaces=true when namespace and workload are omitted.")
+		} else {
+			b.WriteString("\nDefault scope on MCP: all_namespaces=true when namespace is omitted.")
+		}
+	}
 	b.WriteString("\nOutput: one finding per line (logfmt; format=json for JSON)," +
 		" terminated by the mandatory summary line" +
 		" scanned=<n> findings=<n> elapsed=<d> — findings=0 with a summary" +
@@ -173,7 +201,7 @@ func toolDescription(c checks.Command) string {
 			if i > 0 {
 				b.WriteString("; ")
 			}
-			b.WriteString(f.Name + " — " + f.Doc)
+			b.WriteString(f.Name + " — " + mcpWord(c, f.Doc))
 		}
 		b.WriteString(".")
 	}
@@ -215,11 +243,20 @@ func argv(c checks.Command, raw json.RawMessage) ([]string, error) {
 	}
 	slices.Sort(props)
 
-	var out []string
-	var target *string
+	var (
+		out              []string
+		target           *string
+		hasNamespace     bool
+		hasAllNamespaces bool
+		hasWorkload      bool
+	)
 	for _, prop := range props {
 		val := args[prop]
+		isNull := bytes.Equal(bytes.TrimSpace(val), []byte("null"))
 		if prop == targetProperty && c.Positional != nil {
+			if isNull {
+				continue
+			}
 			s, err := decodeString(prop, val)
 			if err != nil {
 				return nil, err
@@ -229,11 +266,14 @@ func argv(c checks.Command, raw json.RawMessage) ([]string, error) {
 		}
 		name := prop
 		if prop == targetProperty {
-			if _, both := args[workloadProperty]; both {
-				return nil, fmt.Errorf("arguments %q and %q name the same parameter for tool %s; pass only %q",
-					targetProperty, workloadProperty, c.MCPName, workloadProperty)
-			}
 			if _, ok := specs[workloadProperty]; ok {
+				if isNull {
+					continue
+				}
+				if w, both := args[workloadProperty]; both && !bytes.Equal(bytes.TrimSpace(w), []byte("null")) {
+					return nil, fmt.Errorf("arguments %q and %q name the same parameter for tool %s; pass only %q",
+						targetProperty, workloadProperty, c.MCPName, workloadProperty)
+				}
 				name = workloadProperty
 			}
 		}
@@ -241,11 +281,17 @@ func argv(c checks.Command, raw json.RawMessage) ([]string, error) {
 		if !ok {
 			return nil, unknownArgument(c, prop)
 		}
+		if isNull {
+			continue
+		}
 		switch spec.Type {
 		case emit.FlagBool:
 			var b bool
 			if err := json.Unmarshal(val, &b); err != nil {
 				return nil, fmt.Errorf("argument %q must be a boolean", prop)
+			}
+			if spec.Name == "A" {
+				hasAllNamespaces = true
 			}
 			out = append(out, fmt.Sprintf("--%s=%t", spec.Name, b))
 		case emit.FlagInt:
@@ -259,8 +305,17 @@ func argv(c checks.Command, raw json.RawMessage) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
+			if spec.Name == "namespace" && s != "" {
+				hasNamespace = true
+			}
+			if spec.Name == "workload" && s != "" {
+				hasWorkload = true
+			}
 			out = append(out, "--"+spec.Name+"="+s)
 		}
+	}
+	if c.MCPDefaultAllNamespaces && !hasAllNamespaces && !hasNamespace && !hasWorkload {
+		out = append(out, "--A=true")
 	}
 	if target != nil {
 		out = append(out, *target)
@@ -361,4 +416,158 @@ func decodeString(prop string, val json.RawMessage) (string, error) {
 		return "", fmt.Errorf("argument %q must be a string", prop)
 	}
 	return s, nil
+}
+
+var (
+	// flagParseErrRe matches Go flag.FlagSet parse diagnostics such as
+	// `invalid value "x" for flag -timeout: parse error`.
+	flagParseErrRe = regexp.MustCompile(`\bfor flag -([A-Za-z][a-z0-9-]*)`)
+	// longFlagTokenRe matches CLI long flags such as --namespace, --min-severity, or --A.
+	longFlagTokenRe = regexp.MustCompile(`--([A-Za-z][a-z0-9-]*)`)
+)
+
+// mcpFlagMap returns CLI flag name -> MCP JSON property name for every
+// non-server-scoped flag belonging to c (common flags, graph history
+// flags when GraphBacked, and c's own flags). Server-scoped flags such
+// as --exemptions and --store stay CLI-worded because they belong to
+// `lookout mcp`, not to tool call arguments.
+func mcpFlagMap(c checks.Command) map[string]string {
+	flags := map[string]string{}
+	add := func(specs []emit.FlagSpec) {
+		for _, s := range specs {
+			if serverScopedFlags[s.Name] {
+				continue
+			}
+			flags[s.Name] = propertyName(s.Name)
+		}
+	}
+	add(c.CommonFlags())
+	if c.GraphBacked {
+		add(emit.GraphHistoryFlags())
+	}
+	add(c.Flags)
+	return flags
+}
+
+func isFlagIdentByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
+}
+
+// mcpWord rewrites CLI flag syntax (-A, --namespace, --workload, and
+// c's own --<flag> names) to MCP JSON property names on the MCP
+// surface (#867). Flags outside c's MCP flag set (such as server-scoped
+// --exemptions/--store or external kubectl flags) and backticked
+// `lookout ...` CLI command snippets are left untouched; CLI `--help`
+// pointers in prose are omitted.
+func mcpWord(c checks.Command, text string) string {
+	if !strings.ContainsRune(text, '-') {
+		return text
+	}
+	text = strings.ReplaceAll(text, "; see the fidelity gap in --help", "")
+	// Preserve backticked `lookout ...` CLI invocations verbatim so
+	// command snippets are never mangled into hybrid CLI/MCP syntax.
+	if strings.Contains(text, "`lookout ") {
+		var b strings.Builder
+		b.Grow(len(text))
+		rest := text
+		for {
+			start := strings.Index(rest, "`lookout ")
+			if start < 0 {
+				b.WriteString(mcpWordSegment(c, rest))
+				break
+			}
+			end := strings.IndexByte(rest[start+1:], '`')
+			if end < 0 {
+				b.WriteString(mcpWordSegment(c, rest))
+				break
+			}
+			end += start + 2
+			b.WriteString(mcpWordSegment(c, rest[:start]))
+			b.WriteString(rest[start:end])
+			rest = rest[end:]
+		}
+		return b.String()
+	}
+	return mcpWordSegment(c, text)
+}
+
+func mcpWordSegment(c checks.Command, text string) string {
+	if !strings.ContainsRune(text, '-') {
+		return text
+	}
+	flags := mcpFlagMap(c)
+
+	// 1. Rewrite Go flag.FlagSet parse errors (`for flag -timeout`).
+	text = flagParseErrRe.ReplaceAllStringFunc(text, func(m string) string {
+		name := strings.TrimPrefix(m, "for flag -")
+		if prop, ok := flags[name]; ok {
+			return fmt.Sprintf("for argument %q", prop)
+		}
+		return m
+	})
+
+	// 2. Rewrite long flags (`--namespace`, `--min-severity`, `--A`) on
+	// identifier boundaries so substrings like `--node-mode` or
+	// `--scale-down-utilization-threshold` are never partially rewritten.
+	if idx := longFlagTokenRe.FindAllStringSubmatchIndex(text, -1); len(idx) > 0 {
+		var b strings.Builder
+		b.Grow(len(text))
+		last := 0
+		for _, loc := range idx {
+			start, end := loc[0], loc[1]
+			nameStart, nameEnd := loc[2], loc[3]
+			if start > 0 && isFlagIdentByte(text[start-1]) {
+				continue
+			}
+			if end < len(text) && isFlagIdentByte(text[end]) {
+				continue
+			}
+			prop, ok := flags[text[nameStart:nameEnd]]
+			if !ok {
+				continue
+			}
+			b.WriteString(text[last:start])
+			b.WriteString(prop)
+			last = end
+		}
+		if last > 0 {
+			b.WriteString(text[last:])
+			text = b.String()
+		}
+	}
+
+	// 3. Rewrite standalone `-A` tokens to `all_namespaces`.
+	if strings.Contains(text, "-A") {
+		var b strings.Builder
+		b.Grow(len(text) + 16)
+		for i := 0; i < len(text); {
+			if i+2 <= len(text) && text[i] == '-' && text[i+1] == 'A' {
+				prevOK := i == 0 || !isFlagIdentByte(text[i-1])
+				nextOK := i+2 == len(text) || !isFlagIdentByte(text[i+2])
+				if prevOK && nextOK {
+					b.WriteString("all_namespaces")
+					i += 2
+					continue
+				}
+			}
+			b.WriteByte(text[i])
+			i++
+		}
+		text = b.String()
+	}
+
+	return text
+}
+
+// mcpUsageDiagnostics formats ExitUsage stderr for the MCP surface:
+// sanitized via emit.MaskString, stripped of any CLI `--help` trailer,
+// and worded with MCP JSON property names instead of CLI flags (#867).
+func mcpUsageDiagnostics(c checks.Command, stderr *bytes.Buffer) string {
+	s := strings.TrimSpace(stderr.String())
+	if s == "" {
+		return "lookout " + c.Name + ": failed without diagnostics"
+	}
+	helpTrailer := fmt.Sprintf("\nRun 'lookout %s --help' for usage.", c.Name)
+	s = strings.TrimSuffix(s, helpTrailer)
+	return mcpWord(c, emit.MaskString(s))
 }

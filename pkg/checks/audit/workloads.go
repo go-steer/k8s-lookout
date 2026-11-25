@@ -76,10 +76,11 @@ const (
 // kind_of_object=HorizontalPodAutoscaler with the HPA's own name.
 func WorkloadsCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:        "audit workloads",
-		MCPName:     "k8s_audit_workloads",
-		MCPProfiles: []string{"audit"},
-		Summary:     "Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, autoscalers that structurally cannot scale, CronJobs left suspended long enough to have skipped runs, standalone Jobs left suspended past a maintenance window, and the rollout-safety claims for Service-backed workloads: liveness probes that fire before readiness on the same handler, serving containers with no preStop hook, and Deployment strategies that permit zero surviving pods. Answers \"what has no safety net\", as against `stab drain`, which answers \"what breaks if I drain THIS node now\". Scope with --namespace, -A, or --workload; scanned counts workloads examined.",
+		Name:                    "audit workloads",
+		MCPName:                 "k8s_audit_workloads",
+		MCPProfiles:             []string{"audit"},
+		MCPDefaultAllNamespaces: true,
+		Summary:                 "Workload reliability posture for workloads that are healthy right now: no PodDisruptionBudget, only one replica, no readiness/liveness probe, no spread across nodes, placement pinned to too few nodes, autoscalers that structurally cannot scale, CronJobs left suspended long enough to have skipped runs, standalone Jobs left suspended past a maintenance window, and the rollout-safety claims for Service-backed workloads: liveness probes that fire before readiness on the same handler, serving containers with no preStop hook, and Deployment strategies that permit zero surviving pods. Answers \"what has no safety net\", as against `stab drain`, which answers \"what breaks if I drain THIS node now\". Scope with --namespace, -A, or --workload; scanned counts workloads examined.",
 		Flags: append([]emit.FlagSpec{
 			{Name: "cron-suspended", Type: emit.FlagDuration, Default: defaultCronSuspended.String(),
 				Help: "how long a CronJob must have been suspended before it reads as forgotten rather than as maintenance in progress; it must also have skipped at least one activation, so the claim scales to the schedule"},

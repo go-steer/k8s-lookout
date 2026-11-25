@@ -32,51 +32,88 @@ import (
 	"github.com/go-steer/k8s-lookout/internal/version"
 	"github.com/go-steer/k8s-lookout/pkg/checks"
 	"github.com/go-steer/k8s-lookout/pkg/cloud"
+	"github.com/go-steer/k8s-lookout/pkg/emit"
 )
 
-// commonProperties are the §4.2 common flags as MCP schema property
-// names; every tool's schema must carry all of them.
-var commonProperties = []string{
-	"namespace", "all_namespaces", "workload", "since", "format", "timeout",
+// commonPropertyFlags maps §4.2 common flags as MCP schema property
+// names to their CLI flag names so tests can verify each tool carries
+// exactly the common properties it accepts (#867).
+var commonPropertyFlags = []struct {
+	prop string
+	flag string
+}{
+	{"namespace", "namespace"},
+	{"all_namespaces", "A"},
+	{"workload", "workload"},
+	{"since", "since"},
+	{"format", "format"},
+	{"timeout", "timeout"},
 }
 
 // TestMCPServesEveryRegisteredCommand is the no-golden smoke test
 // over the REAL default registry (this package imports every check
-// implementation): each non-hidden command yields exactly one tool,
-// named by its MCPName, with a resolvable object schema carrying the
-// common flags, the command's own flags, and target iff positional.
+// implementation): each non-hidden command yields exactly one tool
+// (omitting tools whose required server flag is unset), named by its
+// MCPName, with a resolvable object schema carrying its applicable
+// common flags, its own flags, and target iff positional.
 // Commands merged later are covered automatically — they register,
 // so they are asserted. Privileged commands are the one exception:
 // they are never on the default surface (TestMCPProbeFrom*).
 func TestMCPServesEveryRegisteredCommand(t *testing.T) {
 	visible := map[string]checks.Command{}
+	defaultVisible := map[string]checks.Command{}
 	for _, c := range checks.All() {
 		if !c.Hidden && !c.Privileged {
 			visible[c.MCPName] = c
+			if c.MCPRequiresServerFlag == "" {
+				defaultVisible[c.MCPName] = c
+			}
 		}
 	}
 	if len(visible) == 0 {
 		t.Fatal("default registry has no visible commands — check imports")
 	}
 
-	server := mcpserver.New(checks.Default(), version.Semver())
-	serverT, clientT := mcp.NewInMemoryTransports()
-	if _, err := server.Connect(t.Context(), serverT, nil); err != nil {
-		t.Fatalf("server connect: %v", err)
+	// Without --exemptions / --store, tools requiring those server flags
+	// are omitted from the advertised surface (#867).
+	bareRes := listToolsFor(t, mcpserver.New(checks.Default(), version.Semver()))
+	if got, want := len(bareRes.Tools), len(defaultVisible); got != want {
+		t.Errorf("unconfigured server served %d tools, want %d (omitting tools requiring unset server flags)", got, want)
 	}
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
-	cs, err := client.Connect(t.Context(), clientT, nil)
-	if err != nil {
-		t.Fatalf("client connect: %v", err)
+	bareNames := map[string]bool{}
+	for _, tool := range bareRes.Tools {
+		bareNames[tool.Name] = true
 	}
-	defer cs.Close()
+	for _, hidden := range []string{"k8s_audit_exemptions", "k8s_findings_diff"} {
+		if bareNames[hidden] {
+			t.Errorf("unconfigured server must omit %q when its required server flag is unset", hidden)
+		}
+	}
+	for _, kept := range []string{"k8s_triage_status", "k8s_cluster_health", "k8s_findings_ack"} {
+		if !bareNames[kept] {
+			t.Errorf("unconfigured server must still advertise %q", kept)
+		}
+	}
 
-	res, err := cs.ListTools(t.Context(), nil)
-	if err != nil {
-		t.Fatalf("tools/list: %v", err)
-	}
+	// With both --exemptions and --store configured, every non-hidden,
+	// non-privileged command is served.
+	res := listToolsFor(t, mcpserver.New(checks.Default(), version.Semver(),
+		mcpserver.WithExemptions("/tmp/exemptions.yaml"),
+		mcpserver.WithStore("/tmp/lookout.db"),
+	))
 	if got, want := len(res.Tools), len(visible); got != want {
-		t.Errorf("served %d tools, want %d (one per non-hidden command)", got, want)
+		t.Errorf("configured server served %d tools, want %d (one per non-hidden command)", got, want)
+	}
+
+	defaultAllNS := map[string]bool{
+		"k8s_audit_all":          true,
+		"k8s_audit_workloads":    true,
+		"k8s_audit_hardening":    true,
+		"k8s_audit_rbac":         true,
+		"k8s_audit_netpol":       true,
+		"k8s_audit_namespaces":   true,
+		"k8s_audit_computeclass": true,
+		"k8s_audit_ai":           true,
 	}
 
 	for _, tool := range res.Tools {
@@ -85,11 +122,22 @@ func TestMCPServesEveryRegisteredCommand(t *testing.T) {
 			t.Errorf("tool %q does not correspond to a registered command", tool.Name)
 			continue
 		}
-		if !strings.HasPrefix(tool.Description, c.Summary) {
-			t.Errorf("tool %q: description does not lead with the command summary", tool.Name)
+		if tool.Description == "" {
+			t.Errorf("tool %q: empty description", tool.Name)
 		}
 		if !strings.Contains(tool.Description, "scanned=<n> findings=<n> elapsed=<d>") {
 			t.Errorf("tool %q: description does not state the §4.2 output contract", tool.Name)
+		}
+		if strings.Contains(tool.Description, "--help") {
+			t.Errorf("tool %q: description must not contain --help:\n%s", tool.Name, tool.Description)
+		}
+		// Strip quoted `lookout ...` CLI examples before checking that prose
+		// names MCP properties rather than CLI flags.
+		prose := stripBacktickLookout(tool.Description)
+		for _, cliFlag := range []string{"--namespace", "--workload", " -A", "(-A"} {
+			if strings.Contains(prose, cliFlag) {
+				t.Errorf("tool %q: description prose still contains CLI flag %q:\n%s", tool.Name, cliFlag, tool.Description)
+			}
 		}
 
 		// The wire schema must be a valid, resolvable 2020-12 object
@@ -111,10 +159,23 @@ func TestMCPServesEveryRegisteredCommand(t *testing.T) {
 		if schema.Type != "object" {
 			t.Errorf("tool %q: schema type = %q, want object", tool.Name, schema.Type)
 		}
-		for _, p := range commonProperties {
-			if schema.Properties[p] == nil {
-				t.Errorf("tool %q: schema is missing common property %q", tool.Name, p)
+		for _, p := range commonPropertyFlags {
+			has := schema.Properties[p.prop] != nil
+			want := c.AcceptsCommonFlag(p.flag)
+			if has != want {
+				t.Errorf("tool %q: common property %q present = %v, want %v", tool.Name, p.prop, has, want)
 			}
+		}
+		if defaultAllNS[tool.Name] {
+			if !c.MCPDefaultAllNamespaces {
+				t.Errorf("tool %q: expected MCPDefaultAllNamespaces=true", tool.Name)
+			}
+			prop := schema.Properties["all_namespaces"]
+			if prop == nil || string(prop.Default) != "true" {
+				t.Errorf("tool %q: all_namespaces schema default = %s, want true", tool.Name, string(prop.Default))
+			}
+		} else if c.MCPDefaultAllNamespaces {
+			t.Errorf("tool %q: unexpected MCPDefaultAllNamespaces=true", tool.Name)
 		}
 		for _, f := range c.Flags {
 			if mcpserver.IsServerScopedFlag(f.Name) {
@@ -133,6 +194,60 @@ func TestMCPServesEveryRegisteredCommand(t *testing.T) {
 		if _, hasTarget := schema.Properties["target"]; hasTarget != (c.Positional != nil) {
 			t.Errorf("tool %q: target property presence = %v, want %v", tool.Name, hasTarget, c.Positional != nil)
 		}
+	}
+}
+
+func listToolsFor(t *testing.T, server *mcp.Server) *mcp.ListToolsResult {
+	t.Helper()
+	serverT, clientT := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(t.Context(), serverT, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	cs, err := client.Connect(t.Context(), clientT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	res, err := cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("tools/list: %v", err)
+	}
+	return res
+}
+
+func stripBacktickLookout(s string) string {
+	var b strings.Builder
+	for {
+		start := strings.Index(s, "`lookout ")
+		if start < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		end := strings.IndexByte(s[start+1:], '`')
+		if end < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		b.WriteString(s[:start])
+		s = s[start+end+2:]
+	}
+}
+
+// TestCLIAuditDefaultUnchanged pins that MCP's all_namespaces=true default
+// and MCP-worded errors do not alter CLI behavior (docs/cli-stability-policy.md).
+func TestCLIAuditDefaultUnchanged(t *testing.T) {
+	c, ok := checks.Default().Lookup("audit namespaces")
+	if !ok {
+		t.Fatal("audit namespaces not registered")
+	}
+	var stdout, stderr bytes.Buffer
+	code := emit.Run(t.Context(), c.RunConfig(&stdout, &stderr), nil)
+	if code != emit.ExitUsage {
+		t.Fatalf("CLI `lookout audit namespaces` exit = %d, want %d (stderr: %q)", code, emit.ExitUsage, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--namespace=<ns> or -A") || !strings.Contains(stderr.String(), "Run 'lookout audit namespaces --help' for usage.") {
+		t.Errorf("CLI usage error changed unexpectedly: %q", stderr.String())
 	}
 }
 

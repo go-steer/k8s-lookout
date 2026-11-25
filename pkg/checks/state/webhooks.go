@@ -68,9 +68,10 @@ func init() {
 // the same core.
 func WebhooksCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "state webhooks",
-		MCPName: "k8s_admission_webhooks",
-		Summary: "When creates/updates hang or fail cluster-wide with \"failed calling webhook\", or before relying on a policy engine: audit every admission webhook — dead backends × failurePolicy (Fail + dead backend rejects every matching admission), the namespace/rule blast radius, timeout stall risk, CA-bundle expiry. The full check; health's webhooks category delegates here.",
+		Name:                    "state webhooks",
+		MCPName:                 "k8s_admission_webhooks",
+		InapplicableCommonFlags: []string{"namespace", "A", "workload"},
+		Summary:                 "When creates/updates hang or fail cluster-wide with \"failed calling webhook\", or before relying on a policy engine: audit every admission webhook — dead backends × failurePolicy (Fail + dead backend rejects every matching admission), the namespace/rule blast radius, timeout stall risk, CA-bundle expiry. The full check; health's webhooks category delegates here.",
 		Flags: []emit.FlagSpec{
 			{Name: "cert-warn", Type: emit.FlagDuration, Default: "720h",
 				Help: "report webhook CA bundles expiring within this window"},

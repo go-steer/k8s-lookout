@@ -171,9 +171,10 @@ func specAliasDoc() string {
 // build their own with fakes.
 func SpecCommand(deps SpecDeps) Command {
 	return Command{
-		Name:    "triage spec",
-		MCPName: "k8s_resource_spec",
-		Summary: "Read ONE resource's spec: kubectl describe, but token-dense, secret-safe, and default-elided — healthy conditions are omitted.",
+		Name:                    "triage spec",
+		MCPName:                 "k8s_resource_spec",
+		InapplicableCommonFlags: []string{"A"},
+		Summary:                 "Read ONE resource's spec: kubectl describe, but token-dense, secret-safe, and default-elided — healthy conditions are omitted.",
 		Positional: &Positional{
 			Meta: "<Kind>/[<namespace>/]<name>",
 			Doc: "the resource to read; Kind is case-insensitive, accepts the aliases " + specAliasDoc() +

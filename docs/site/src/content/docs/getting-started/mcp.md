@@ -512,7 +512,10 @@ guesses; a bare name repeated across projects resolves to
   runs in; `net probe-from` probes from inside any cluster.
 - **One cluster cannot take every slot:** each cluster's calls in flight
   are capped (the global limit divided by the number of clusters, at
-  least 2; `--max-concurrency-per-cluster` overrides).
+  least 2; `--max-concurrency-per-cluster` overrides). Multi-tenant HTTP
+  endpoints fail fast past the cap so one slow cluster cannot wedge
+  shared slots; single-caller stdio queues calls for that cluster until
+  a slot opens or the call is canceled.
 - **Stateless HTTP:** any replica answers any request, so the endpoint
   scales as a Deployment behind a Service with no sticky sessions.
 - `--kubeconfig`/`--context` pin one cluster and are refused here; a
@@ -688,10 +691,12 @@ lookout mcp --max-response-bytes=100000   # the default; 0 disables
 ```
 
 A tool result over the limit loses whole finding lines, never part of
-one, and always keeps its summary line. Most commands emit the worst
-findings first, so the first ones are kept; a timeline (`triage
-events`, `triage changes`) is oldest first, so the newest ones are
-kept. The rewritten summary line still obeys the output contract, so
+one, and always keeps its summary line. Most commands sort findings
+stably worst-first by severity (`critical`, `warning`, `info`) before
+cutting from the tail so severe findings in later namespaces survive
+truncation; a timeline (`triage events`, `triage changes`) keeps its
+chronological order and drops from the oldest end so the newest entries
+survive. The rewritten summary line still obeys the output contract, so
 `findings=` counts the lines actually returned, and it says what was
 left out:
 
@@ -701,16 +706,15 @@ scanned=4210 findings=212 elapsed=2.1s response_truncated=3911 response_truncate
 
 `response_truncated` is how many findings were dropped, and
 `response_truncated_severity` how bad they were. `response_hint` names
-the arguments that would narrow the call, leaving out the ones the
-call already used. It offers `since` only for tools that read a time
-window (`triage events`, `triage changes`, `triage logs`,
-`k8s_triage_workload`, `perf probe`, `cloud stockout`): every tool
-accepts it, but the rest ignore it. Every other note on the line
-(`exempt=`, `context=`, a command's own) stays where it was, and
-`exempt=` counts only the findings returned. `--format=json` results
-are cut the same way, one object per line, with the summary still a
-JSON object. The CLI never cuts anything: the limit is a property of
-the MCP surface.
+only the arguments the tool accepts that would narrow the call, leaving
+out the ones the call already used. It offers `since` only for tools
+that read a time window (`triage events`, `triage changes`, `triage
+logs`, `k8s_triage_workload`, `perf probe`, `cloud stockout`). Every
+other note on the line (`exempt=`, `context=`, a command's own) stays
+where it was, and `exempt=` counts only the findings returned.
+`--format=json` results are cut the same way, one object per line, with
+the summary still a JSON object. The CLI never cuts anything: the limit
+is a property of the MCP surface.
 
 `k8s_list_clusters` is cut the same way: it keeps the first clusters
 (those readable cluster-wide come first), every discovery-scope line
@@ -746,7 +750,9 @@ schema layer rejects before the command ever runs are logged too;
 those are exactly the ones worth noticing. `bytes` is what the caller
 was sent; when the [response size limit](#response-size-limit) cut a
 result, `truncated=<n>` at the end of the line counts the findings
-left out.
+left out, and when a stateful session pauses a call to ask the person to
+choose a cluster, `elicit=cluster` is recorded immediately before
+waiting on the client.
 
 The file is created if absent, **appended** if present (a supervisor
 restart must not erase the evidence from the run that caused it), and
@@ -767,14 +773,27 @@ path.
 
 Tool names are the commands' MCP names — `triage delta` →
 `k8s_triage_delta`, `bundle` → `k8s_triage_workload` — with input
-schemas mirrored from the CLI flags (plus a `target` property where a
-command takes a positional argument).
+schemas mirrored from the CLI flags that apply to that command (plus a
+`target` property where a command takes a positional argument, and
+omitting scope properties such as `workload`, `namespace`, or
+`all_namespaces` on tools that reject them). Tool descriptions and
+invalid-parameter diagnostics use MCP JSON property names rather than
+CLI flags and omit CLI `--help` hints. Namespace-scoped `audit` tools
+(`k8s_audit_all`, `k8s_audit_workloads`, `k8s_audit_hardening`,
+`k8s_audit_rbac`, `k8s_audit_netpol`, `k8s_audit_namespaces`,
+`k8s_audit_computeclass`, `k8s_audit_ai`) default `all_namespaces` to
+`true` on MCP when no scope property is supplied (CLI defaults stay
+unchanged). Tools whose required server-scoped path flag is unset —
+`k8s_audit_exemptions` without `--exemptions` and `k8s_findings_diff`
+without `--store` — are omitted from the advertised surface until that
+flag is configured.
 
-Two conveniences for clients that guess: on every other tool `target`
-is accepted as a synonym for `workload`, and an argument name the tool
-does not know is rejected with the nearest one it does —
-`unknown argument "form" for tool k8s_scan; did you mean "format"?
-(accepts: …)`. Only the canonical names appear in the schemas.
+Two conveniences for clients that guess: on workload-scoped tools
+without a positional argument, `target` is accepted as a synonym for
+`workload`, and an argument name the tool does not know is rejected with
+the nearest one it does — `unknown argument "form" for tool k8s_scan;
+did you mean "format"? (accepts: …)`. Only the canonical names appear in
+the schemas.
 
 The current surface:
 

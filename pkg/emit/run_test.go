@@ -404,6 +404,42 @@ func TestRunUsageErrorFromCheck(t *testing.T) {
 	}
 }
 
+// TestRunOmitHelpHint suppresses the CLI --help trailer for non-CLI
+// hosts such as `lookout mcp` while leaving default CLI stderr intact.
+func TestRunOmitHelpHint(t *testing.T) {
+	boom := func(ctx context.Context, inv Invocation) (int, error) {
+		return 0, UsageErrorf("no scope: pass --namespace=<ns> or -A")
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), RunConfig{
+		Name:         "audit namespaces",
+		Check:        boom,
+		Stdout:       &stdout,
+		Stderr:       &stderr,
+		OmitHelpHint: true,
+	}, nil)
+	if code != ExitUsage {
+		t.Fatalf("exit = %d, want %d", code, ExitUsage)
+	}
+	if strings.Contains(stderr.String(), "--help") {
+		t.Errorf("OmitHelpHint=true still printed --help trailer: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "audit namespaces: no scope:") {
+		t.Errorf("stderr = %q, want usage diagnostic", stderr.String())
+	}
+	stderr.Reset()
+	code = Run(context.Background(), RunConfig{
+		Name:         "audit namespaces",
+		Check:        boom,
+		Stdout:       &stdout,
+		Stderr:       &stderr,
+		OmitHelpHint: true,
+	}, []string{"--since=-5s"})
+	if code != ExitUsage || strings.Contains(stderr.String(), "--help") {
+		t.Errorf("flag-validation error with OmitHelpHint=true: code=%d stderr=%q", code, stderr.String())
+	}
+}
+
 // --kubeconfig and --context reach the client constructors through
 // the context, not through the check's signature, so the assertion is
 // on what kube.SelectionFrom sees inside the check.

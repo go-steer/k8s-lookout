@@ -150,6 +150,30 @@ type Command struct {
 	// the declaration to the code. Plain additive field: the zero value
 	// is "ignores --since".
 	UsesSince bool
+	// InapplicableCommonFlags lists §4.2 common scope flag names
+	// ("namespace", "A", "workload", "since") that this command rejects
+	// as usage errors. CLI flag parsing keeps the uniform §4.2 flag set
+	// (still rejecting them with each command's explanatory exit-2
+	// message), while the MCP surface omits them from the tool's
+	// inputSchema, rejects them as unknown arguments in argv, and never
+	// suggests them in response_hint narrowing hints (#867). Plain
+	// additive field: empty means all common scope flags stay in the
+	// MCP schema.
+	InapplicableCommonFlags []string
+	// MCPDefaultAllNamespaces causes the MCP surface to default
+	// all_namespaces to true when the caller passes none of namespace,
+	// all_namespaces, or workload (DESIGN.md §4.3 amendment, #867). CLI
+	// invocations are unaffected and keep requiring an explicit scope.
+	MCPDefaultAllNamespaces bool
+	// MCPRequiresServerFlag names the operator-pinned server path flag
+	// ("exemptions" or "store") that `lookout mcp` must be configured
+	// with for this tool to be usable over MCP. Because server-scoped
+	// path flags are stripped from MCP input schemas, advertising such
+	// a tool without the flag guarantees a usage error on every call;
+	// `lookout mcp` omits it from the advertised surface when the
+	// required flag is unset (#867). Empty means no server flag is
+	// required.
+	MCPRequiresServerFlag string
 }
 
 // OutputField documents one Details key a command may emit.
@@ -224,6 +248,17 @@ type Positional struct {
 	// Doc explains the argument's syntax and defaults, --help
 	// style: terse, exhaustive, written for an agent reader.
 	Doc string
+}
+
+// AcceptsCommonFlag reports whether common flag name (e.g. "namespace",
+// "A", "workload", "since") applies to this command on the MCP surface.
+func (c Command) AcceptsCommonFlag(name string) bool {
+	for _, f := range c.InapplicableCommonFlags {
+		if f == name {
+			return false
+		}
+	}
+	return true
 }
 
 // CommonFlags returns the §4.2 common flags as this command accepts
@@ -422,6 +457,35 @@ func (c Command) validateProfiles() error {
 	return nil
 }
 
+// validateMCPMetadata validates InapplicableCommonFlags,
+// MCPDefaultAllNamespaces, and MCPRequiresServerFlag (#867).
+func (c Command) validateMCPMetadata() error {
+	seen := map[string]bool{}
+	for _, f := range c.InapplicableCommonFlags {
+		switch f {
+		case "namespace", "A", "workload", "since":
+		default:
+			return fmt.Errorf("command %q: InapplicableCommonFlags contains %q (want namespace, A, workload, or since)", c.Name, f)
+		}
+		if seen[f] {
+			return fmt.Errorf("command %q: InapplicableCommonFlags lists %q twice", c.Name, f)
+		}
+		seen[f] = true
+	}
+	if c.UsesSince && seen["since"] {
+		return fmt.Errorf("command %q: declares both UsesSince and InapplicableCommonFlags[\"since\"]", c.Name)
+	}
+	if c.MCPDefaultAllNamespaces && seen["A"] {
+		return fmt.Errorf("command %q: declares both MCPDefaultAllNamespaces and InapplicableCommonFlags[\"A\"]", c.Name)
+	}
+	switch c.MCPRequiresServerFlag {
+	case "", "exemptions", "store":
+	default:
+		return fmt.Errorf("command %q: unknown MCPRequiresServerFlag %q (want empty, exemptions, or store)", c.Name, c.MCPRequiresServerFlag)
+	}
+	return nil
+}
+
 // EmitsKind reports whether the command declared kind, and at what
 // severities. Consumers of the ledger (the contract tests, the
 // generated glossary) go through here rather than scanning Kinds.
@@ -488,6 +552,9 @@ func (c Command) Validate() error {
 		return err
 	}
 	if err := c.validateProfiles(); err != nil {
+		return err
+	}
+	if err := c.validateMCPMetadata(); err != nil {
 		return err
 	}
 	seen := map[string]bool{}

@@ -158,11 +158,12 @@ func skippedSystemNamespacesField() checks.OutputField {
 // effective rule table as `audit.policy_rule` info records.
 func PolicyCommand() checks.Command {
 	return checks.Command{
-		Name:        "audit policy",
-		MCPName:     "k8s_audit_policy",
-		MCPProfiles: []string{"audit"},
-		Summary:     "Dump the effective posture rule table after merging detector defaults, --profile, --policy, and CLI overrides (--only, --skip, --min-severity, --set) so operators and agents can inspect what a scan will enforce before running it.",
-		Flags:       PolicyFlags(),
+		Name:                    "audit policy",
+		MCPName:                 "k8s_audit_policy",
+		MCPProfiles:             []string{"audit"},
+		InapplicableCommonFlags: []string{"namespace", "A", "workload"},
+		Summary:                 "Dump the effective posture rule table after merging detector defaults, --profile, --policy, and CLI overrides (--only, --skip, --min-severity, --set) so operators and agents can inspect what a scan will enforce before running it.",
+		Flags:                   PolicyFlags(),
 		Kinds: []checks.KindField{
 			checks.Kind(kindPolicyRule, "the resolved enablement, effective severity, provenance layer, and threshold parameters for one posture check rule", emit.SeverityInfo),
 		},

@@ -325,6 +325,67 @@ All read-path logic lives in `pkg/checks`, consumed by:
    pre-warm incident sessions (§7.6). No fork/exec; shares the informer cache
    and the live topology index.
 
+**Amendment (2026-11-25, #867 — MCP surface ergonomics):** CLI flags, CLI
+defaults, CLI stderr diagnostics, and CLI exit codes stay unchanged per
+`docs/cli-stability-policy.md`, while the MCP transport applies four
+surface-specific ergonomic refinements derived mechanically from
+`checks.Command` metadata:
+
+1. **MCP-worded diagnostics and descriptions.** Usage errors returned as
+   JSON-RPC `InvalidParams` (`-32602`) omit `Run 'lookout <cmd> --help' for
+   usage.` (`emit.RunConfig.OmitHelpHint`) and translate CLI flag tokens
+   (`-A`, `--namespace`, `--workload`, and command `--<flag>` names) to MCP
+   JSON property names (`all_namespaces`, `namespace`, `workload`,
+   snake_case flags) in both error messages and tool/property descriptions.
+   Server-scoped `lookout mcp` flags (`--exemptions`, `--store`, etc.) stay
+   CLI-worded.
+2. **Default `all_namespaces: true` on namespace-scoped audit tools (MCP
+   only).** On the MCP surface, the eight namespace-scoped audit tools
+   (`k8s_audit_all`, `k8s_audit_workloads`, `k8s_audit_hardening`,
+   `k8s_audit_rbac`, `k8s_audit_netpol`, `k8s_audit_namespaces`,
+   `k8s_audit_computeclass`, `k8s_audit_ai`) declare
+   `MCPDefaultAllNamespaces: true` so calling them with no `namespace`,
+   `all_namespaces`, or `workload` (where supported) argument defaults to
+   `all_namespaces: true` (reflected as `default: true` in their JSON
+   schemas). Explicit `namespace`, `workload` (or `target` alias), or
+   `all_namespaces: false` overrides the default; CLI `lookout audit ...`
+   still requires explicit `--namespace`/`-A`/`--workload`. Accepted
+   trade-offs:
+   - *Large-cluster timeout risk:* `k8s_audit_all` runs under its 60s
+     default timeout and returns no partial findings if a full-cluster sweep
+     exceeds the deadline; callers on large clusters should narrow with
+     `namespace` or raise `timeout`.
+   - *Response-size truncation:* an all-namespace sweep produces more
+     findings and is more likely to hit `--max-response-bytes` (default
+     100,000 bytes). Mitigated by stably sorting non-timeline findings
+     worst-first by severity (`critical`, `warning`, `info`) before
+     truncating so severe findings in alphabetically later namespaces
+     survive the cut.
+   - *Namespace-scoped RBAC callers:* a caller with only per-namespace
+     `RoleBinding` grants hitting cluster-wide list calls receives either
+     `read.unavailable` findings (`pkg/checks/audit/snapshot.go`'s
+     `ForbiddenRefusal` handling) or fatal `Forbidden` errors
+     (`fatalRefusal` in `pkg/checks/audit/netpol.go` and
+     `pkg/checks/audit/templates.go`, returned as MCP tool errors) and
+     should pass `namespace` explicitly.
+3. **Strip inapplicable scope properties from schemas and narrowing hints.**
+   Commands declare rejected common scope flags in
+   `checks.Command.InapplicableCommonFlags` (`namespace`, `A`, `workload`,
+   `since`); `internal/mcpserver` omits those properties from `inputSchema`,
+   rejects them (including the `target` alias when `workload` is omitted),
+   and restricts `response_hint` narrowing suggestions to properties the
+   tool actually accepts.
+4. **Hide tools whose required server-scoped path flag is unset.** Tools
+   declaring `MCPRequiresServerFlag` (`k8s_audit_exemptions` requiring
+   `--exemptions`, `k8s_findings_diff` requiring `--store`) are omitted from
+   `tools/list` and `--list-tools` when the corresponding server flag is
+   unset; explicitly requesting one in `--tools` fails startup with an
+   actionable error naming the missing flag, while `-<tool>` removals stay
+   valid no-ops. `k8s_cluster_health` (which degrades cleanly without a
+   store) as well as `k8s_triage_status` and `k8s_findings_ack` (which
+   remain intentionally advertised and refuse with `--store is required`
+   when `--store` is unset) stay on the default surface.
+
 ### 4.4 Teaching the agent the surface
 
 A tool the model doesn't know to reach for is shelfware. Education is layered

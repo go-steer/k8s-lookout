@@ -146,4 +146,30 @@ func TestMCPListToolsHonorsTheSelection(t *testing.T) {
 	if !strings.Contains(stderr, "triage") {
 		t.Errorf("the error does not name the profiles that do exist: %q", stderr)
 	}
+
+	// Unconfigured server-flag tools are omitted by default, included
+	// once their flag is configured, allowed in `-<tool>` removals, and
+	// rejected with an actionable message if added explicitly (#867).
+	if strings.Contains(full, "k8s_audit_exemptions") || strings.Contains(full, "k8s_findings_diff") {
+		t.Errorf("--list-tools without --exemptions/--store must omit unconfigured tools:\n%s", full)
+	}
+	code, withFlags, stderr := run("--exemptions=/tmp/ex.yaml", "--store=/tmp/store.db", "--list-tools")
+	if code != 0 {
+		t.Fatalf("--list-tools with --exemptions/--store exit = %d, stderr: %s", code, stderr)
+	}
+	if !strings.Contains(withFlags, "k8s_audit_exemptions") || !strings.Contains(withFlags, "k8s_findings_diff") {
+		t.Errorf("--list-tools with --exemptions/--store must include configured tools:\n%s", withFlags)
+	}
+	code, _, stderr = run("--tools=k8s_audit_exemptions", "--list-tools")
+	if code != 2 || !strings.Contains(stderr, "--exemptions") {
+		t.Errorf("explicit --tools=k8s_audit_exemptions without --exemptions: code=%d stderr=%q", code, stderr)
+	}
+	code, _, stderr = run("--tools=k8s_findings_diff", "--list-tools")
+	if code != 2 || !strings.Contains(stderr, "--store") {
+		t.Errorf("explicit --tools=k8s_findings_diff without --store: code=%d stderr=%q", code, stderr)
+	}
+	code, _, stderr = run("--tools=all,-k8s_findings_diff,-k8s_audit_exemptions", "--list-tools")
+	if code != 0 {
+		t.Errorf("removing unconfigured tools must stay a valid no-op: code=%d stderr=%q", code, stderr)
+	}
 }

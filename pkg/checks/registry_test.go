@@ -150,6 +150,19 @@ func TestCommandValidate(t *testing.T) {
 		{"privileged command in a profile", func(c *Command) {
 			c.Privileged, c.Writes, c.MCPProfiles = true, true, []string{"triage"}
 		}},
+		{"inapplicable flag not a scope flag", func(c *Command) {
+			c.InapplicableCommonFlags = []string{"format"}
+		}},
+		{"inapplicable flag duplicated", func(c *Command) {
+			c.InapplicableCommonFlags = []string{"workload", "workload"}
+		}},
+		{"default all_namespaces conflicts with inapplicable A", func(c *Command) {
+			c.MCPDefaultAllNamespaces = true
+			c.InapplicableCommonFlags = []string{"A"}
+		}},
+		{"unknown MCPRequiresServerFlag", func(c *Command) {
+			c.MCPRequiresServerFlag = "kubeconfig"
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

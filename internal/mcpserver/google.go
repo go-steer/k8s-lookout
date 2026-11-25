@@ -352,22 +352,29 @@ func hasStewardScope(c purser.Caller, scope string) bool {
 	return slices.Contains(strings.Fields(c.Label(authserver.LabelScope)), scope)
 }
 
-// callerLimit bounds each caller's calls in flight. A caller over the
-// limit is turned away at once rather than queued: an agent that fans out
-// past it gets a clear error to back off on, and the slots stay free for
-// everyone else.
+// callerLimit bounds each key's calls in flight (per caller or per
+// cluster). acquire / acquireUpTo turn away calls past the cap at once
+// (fail-fast, used on multi-tenant HTTP endpoints so one busy caller or
+// slow cluster cannot wedge shared slots); waitAcquireUpTo queues
+// callers until a slot opens or ctx is canceled (used for per-cluster
+// throttling on single-caller stdio, #867).
 type callerLimit struct {
 	max      int
 	mu       sync.Mutex
 	inflight map[string]int
+	notify   map[string]chan struct{}
 }
 
 func newCallerLimit(max int) *callerLimit {
-	return &callerLimit{max: max, inflight: map[string]int{}}
+	return &callerLimit{
+		max:      max,
+		inflight: map[string]int{},
+		notify:   map[string]chan struct{}{},
+	}
 }
 
 // acquire takes a slot for caller, or reports false if caller already has
-// max calls in flight. release must be called exactly once after a true.
+// max calls in flight. release must be called after a true (idempotent).
 func (l *callerLimit) acquire(caller string) (release func(), ok bool) {
 	return l.acquireUpTo(caller, l.max)
 }
@@ -378,15 +385,63 @@ func (l *callerLimit) acquire(caller string) (release func(), ok bool) {
 func (l *callerLimit) acquireUpTo(caller string, max int) (release func(), ok bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.inflight[caller] >= max {
+	if max <= 0 || l.inflight[caller] >= max {
 		return nil, false
 	}
 	l.inflight[caller]++
-	return func() {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		if l.inflight[caller]--; l.inflight[caller] <= 0 {
-			delete(l.inflight, caller)
+	return l.releaser(caller), true
+}
+
+// waitAcquireUpTo acquires a slot for caller under max, waiting for an
+// in-flight call on the same key to finish if the cap is full. Waiting
+// respects ctx cancellation and never leaks a slot or waiter channel.
+func (l *callerLimit) waitAcquireUpTo(ctx context.Context, caller string, max int) (func(), error) {
+	if max <= 0 {
+		return nil, errors.New("concurrency limit must be positive")
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-	}, true
+		l.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			l.mu.Unlock()
+			return nil, err
+		}
+		if l.inflight[caller] < max {
+			l.inflight[caller]++
+			l.mu.Unlock()
+			return l.releaser(caller), nil
+		}
+		ch := l.notify[caller]
+		if ch == nil {
+			ch = make(chan struct{})
+			l.notify[caller] = ch
+		}
+		l.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// releaser returns an idempotent release function that frees one slot for
+// caller and wakes any waiters queued on the same key.
+func (l *callerLimit) releaser(caller string) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			if l.inflight[caller]--; l.inflight[caller] <= 0 {
+				delete(l.inflight, caller)
+			}
+			if ch := l.notify[caller]; ch != nil {
+				close(ch)
+				delete(l.notify, caller)
+			}
+		})
+	}
 }

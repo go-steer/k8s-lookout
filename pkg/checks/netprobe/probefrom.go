@@ -194,10 +194,11 @@ func NewFrom(deps FromDeps, cfg FromConfig) checks.Command {
 	}
 	flags = append(flags, probeFlags()...)
 	return checks.Command{
-		Name:    "net probe-from",
-		MCPName: "k8s_net_probe_from",
-		Summary: "PRIVILEGED, opt-in: run net probe's DNS/TCP/HTTP checks from inside one named pod's network — the caller's vantage, for faults only that pod sees — by adding an ephemeral container that stays in the pod's spec; refused without the deploy-probe/ grant.",
-		Flags:   flags,
+		Name:                    "net probe-from",
+		MCPName:                 "k8s_net_probe_from",
+		InapplicableCommonFlags: []string{"namespace", "A", "workload", "since"},
+		Summary:                 "PRIVILEGED, opt-in: run net probe's DNS/TCP/HTTP checks from inside one named pod's network — the caller's vantage, for faults only that pod sees — by adding an ephemeral container that stays in the pod's spec; refused without the deploy-probe/ grant.",
+		Flags:                   flags,
 		Kinds: append(probeKinds(),
 			checks.Kind(KindRefused, "no probe ran and the pod was not changed: this identity lacks a grant the command needs (the message names it, in the shared refusal wording), an admission policy rejected the probe container (reason=AdmissionDenied), the admission policy that guards the grant is missing or does not cover this identity so the grant is unguarded (reason=PolicyMissing), or the pod cannot be probed safely (not Running, hostNetwork, or already holding the per-pod limit of lookout probe containers); reason says which", emit.SeverityInfo)),
 		Output: append([]checks.OutputField{
