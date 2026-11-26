@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-11-26
+
+**This release improves `lookout mcp` ergonomics for interactive and flat-agent callers (#867).** MCP errors drop CLI `--help` hints and translate flag names to JSON property names; namespace-scoped audit tools default to `all_namespaces: true` over MCP; inapplicable scope properties (`namespace`, `all_namespaces`, `workload`, `since`) are omitted from tool schemas and rejected cleanly; unconfigured server-flag tools (`k8s_audit_exemptions` without `--exemptions`, `k8s_findings_diff` without `--store`) are hidden from advertising; single-caller stdio queues excess per-cluster calls instead of rejecting them; non-timeline responses sort worst-first by severity before `--max-response-bytes` truncation; and multi-cluster elicitation emits structured `elicit=cluster` access-log entries.
+
 ### Changed
 
 - **MCP surface ergonomics: MCP-worded errors and descriptions, default `all_namespaces: true` on namespace-scoped audit tools, stripped inapplicable scope properties, omitted unconfigured server-flag tools, stdio per-cluster queueing, severity-sorted response truncation, and elicitation access logging (#867).**

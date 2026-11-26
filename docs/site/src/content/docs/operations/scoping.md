@@ -136,7 +136,7 @@ top-level `deploy-namespaced/` and `deploy-namespaced-strict/`
 directories remain as compatibility aliases):
 
 ```sh
-kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-namespaced?ref=v0.45.0"
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-namespaced?ref=v0.46.0"
 ```
 
 They watch the namespace the sentinel runs in. With the chart, list
@@ -165,7 +165,7 @@ top of `deploy/base/` (the top-level `deploy-no-secrets/` directory
 remains as a compatibility alias, first shipped in v0.29.0):
 
 ```sh
-kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-no-secrets?ref=v0.45.0"
+kubectl apply -k "github.com/go-steer/k8s-lookout/deploy-no-secrets?ref=v0.46.0"
 # or, from a clone
 kubectl apply -k deploy-no-secrets/
 ```
