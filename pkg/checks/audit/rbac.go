@@ -130,10 +130,12 @@ const (
 // as with audit.podsecurity_gaps.
 func RBACCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:        "audit rbac",
-		MCPName:     "k8s_audit_rbac",
-		MCPProfiles: []string{"audit"},
-		Summary:     "RBAC over-permission posture: bindings that grant cluster-admin, or a role whose rules are cluster-admin under another name, and Roles/ClusterRoles whose rules use `*` for verbs or resources. Judges a binding by the rules of the role it points at, not by the role's name. Objects the platform reconciles (the bootstrap defaults, addon-manager Reconcile objects) are counted, not reported. --namespace judges that namespace's Roles and RoleBindings; ClusterRoles and ClusterRoleBindings are judged under -A. scanned counts bindings and roles examined.",
+		Name:                    "audit rbac",
+		MCPName:                 "k8s_audit_rbac",
+		MCPProfiles:             []string{"audit"},
+		MCPDefaultAllNamespaces: true,
+		InapplicableCommonFlags: []string{"workload"},
+		Summary:                 "RBAC over-permission posture: bindings that grant cluster-admin, or a role whose rules are cluster-admin under another name, and Roles/ClusterRoles whose rules use `*` for verbs or resources. Judges a binding by the rules of the role it points at, not by the role's name. Objects the platform reconciles (the bootstrap defaults, addon-manager Reconcile objects) are counted, not reported. --namespace judges that namespace's Roles and RoleBindings; ClusterRoles and ClusterRoleBindings are judged under -A. scanned counts bindings and roles examined.",
 		Flags: append([]emit.FlagSpec{
 			skipSystemNamespacesFlag(),
 			perWorkloadFlag(),

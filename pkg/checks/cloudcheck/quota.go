@@ -52,9 +52,10 @@ const (
 // QuotaCommand builds the `cloud quota` declaration around deps.
 func QuotaCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "cloud quota",
-		MCPName: "k8s_cloud_quota",
-		Summary: "Per-project cloud quota usage vs limit, ranked nearest-to-exhaustion: findings from --quota-warn (default 80%), critical at 95% — quota is incompressible (scale-ups fail at the limit) and increases need lead time. Trend/ETA lives in the quota source.",
+		Name:                    "cloud quota",
+		MCPName:                 "k8s_cloud_quota",
+		InapplicableCommonFlags: []string{"namespace", "A", "workload"},
+		Summary:                 "Per-project cloud quota usage vs limit, ranked nearest-to-exhaustion: findings from --quota-warn (default 80%), critical at 95% — quota is incompressible (scale-ups fail at the limit) and increases need lead time. Trend/ETA lives in the quota source.",
 		Flags: []emit.FlagSpec{
 			{Name: "quota-warn", Type: emit.FlagInt, Default: strconv.Itoa(defaultQuotaWarnPct),
 				Help: "report a quota only at or above this percent of its limit (critical is fixed at 95%)"},

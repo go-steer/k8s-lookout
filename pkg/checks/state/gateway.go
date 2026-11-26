@@ -94,9 +94,10 @@ var (
 // GatewayCommand builds the `lookout state gateway` command.
 func GatewayCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "state gateway",
-		MCPName: "k8s_gateway_routes",
-		Summary: "When traffic through the Gateway API does not arrive — walk GatewayClass → Gateway → listener → HTTPRoute → Service and report every hop that is rejected, unprogrammed, or points at something that is not there. Silent, and cheap, on clusters without the Gateway API installed.",
+		Name:                    "state gateway",
+		MCPName:                 "k8s_gateway_routes",
+		InapplicableCommonFlags: []string{"workload"},
+		Summary:                 "When traffic through the Gateway API does not arrive — walk GatewayClass → Gateway → listener → HTTPRoute → Service and report every hop that is rejected, unprogrammed, or points at something that is not there. Silent, and cheap, on clusters without the Gateway API installed.",
 		Kinds: []checks.KindField{
 			checks.Kind("gateway.missing_class", "the Gateway names a GatewayClass that does not exist — nothing will program it", emit.SeverityCritical),
 			checks.Kind("gateway.class_not_accepted", "the Gateway's GatewayClass is not Accepted by its controller", emit.SeverityCritical),

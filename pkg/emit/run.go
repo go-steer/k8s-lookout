@@ -125,6 +125,12 @@ type RunConfig struct {
 	// add one earlier call when --at is given a duration, to anchor
 	// "20m ago".)
 	Now func() time.Time
+	// OmitHelpHint suppresses the "Run '<name> --help' for usage."
+	// trailer appended to ExitUsage diagnostics. Non-CLI hosts such as
+	// `lookout mcp` set this because MCP tools have no --help flag and
+	// printing one prompts models to probe bogus arguments (#867). The
+	// CLI leaves it false, keeping stderr unchanged.
+	OmitHelpHint bool
 }
 
 // Run executes one check invocation under the §4.2 contract: parse
@@ -180,7 +186,7 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 				fmt.Fprint(stdout, cfg.helpText(fs))
 				return ExitData
 			}
-			return usageError(stderr, cfg.Name, err)
+			return usageError(stderr, cfg.Name, err, cfg.OmitHelpHint)
 		}
 		if fs.NArg() == 0 {
 			break
@@ -189,45 +195,45 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 		rest = fs.Args()[1:]
 	}
 	if len(positionals) > cfg.MaxArgs {
-		return usageError(stderr, cfg.Name, fmt.Errorf("unexpected argument %q", positionals[cfg.MaxArgs]))
+		return usageError(stderr, cfg.Name, fmt.Errorf("unexpected argument %q", positionals[cfg.MaxArgs]), cfg.OmitHelpHint)
 	}
 
 	values := FlagValues{fs: fs}
 	scope, err := scopeFromValues(values, cfg.GraphBacked, now)
 	if err != nil {
-		return usageError(stderr, cfg.Name, err)
+		return usageError(stderr, cfg.Name, err, cfg.OmitHelpHint)
 	}
 	format, err := ParseFormat(values.String("format"))
 	if err != nil {
-		return usageError(stderr, cfg.Name, err)
+		return usageError(stderr, cfg.Name, err, cfg.OmitHelpHint)
 	}
 	timeout := values.Duration("timeout")
 	if timeout <= 0 {
-		return usageError(stderr, cfg.Name, fmt.Errorf("--timeout must be positive, got %s", timeout))
+		return usageError(stderr, cfg.Name, fmt.Errorf("--timeout must be positive, got %s", timeout), cfg.OmitHelpHint)
 	}
 	concurrency := values.Int("concurrency")
 	if concurrency <= 0 {
-		return usageError(stderr, cfg.Name, fmt.Errorf("--concurrency must be positive, got %d", concurrency))
+		return usageError(stderr, cfg.Name, fmt.Errorf("--concurrency must be positive, got %d", concurrency), cfg.OmitHelpHint)
 	}
 	kubeconfigDir := strings.TrimSpace(values.String("kubeconfig-dir"))
 	if values.IsSet("kubeconfig-dir") && kubeconfigDir == "" {
-		return usageError(stderr, cfg.Name, errors.New("--kubeconfig-dir must not be empty"))
+		return usageError(stderr, cfg.Name, errors.New("--kubeconfig-dir must not be empty"), cfg.OmitHelpHint)
 	}
 	contextsRaw := strings.TrimSpace(values.String("contexts"))
 	if values.IsSet("contexts") {
 		if _, _, err := kube.ParseContextsList(contextsRaw); err != nil {
-			return usageError(stderr, cfg.Name, err)
+			return usageError(stderr, cfg.Name, err, cfg.OmitHelpHint)
 		}
 	}
 	if scope.Context != "" && (contextsRaw != "" || values.IsSet("contexts")) {
-		return usageError(stderr, cfg.Name, errors.New("--context and --contexts are mutually exclusive"))
+		return usageError(stderr, cfg.Name, errors.New("--context and --contexts are mutually exclusive"), cfg.OmitHelpHint)
 	}
 	if scope.Kubeconfig != "" && (kubeconfigDir != "" || values.IsSet("kubeconfig-dir")) {
-		return usageError(stderr, cfg.Name, errors.New("--kubeconfig and --kubeconfig-dir are mutually exclusive"))
+		return usageError(stderr, cfg.Name, errors.New("--kubeconfig and --kubeconfig-dir are mutually exclusive"), cfg.OmitHelpHint)
 	}
 	googleAuth := strings.TrimSpace(values.String("google-auth"))
 	if err := cloud.ValidateGoogleAuth(googleAuth); err != nil {
-		return usageError(stderr, cfg.Name, err)
+		return usageError(stderr, cfg.Name, err, cfg.OmitHelpHint)
 	}
 	if googleAuth != "" {
 		ctx = cloud.WithGoogleAuth(ctx, googleAuth)
@@ -244,7 +250,7 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	if path := values.String("exemptions"); path != "" {
 		exemptions, err = exempt.Load(path, now())
 		if err != nil {
-			return usageError(stderr, cfg.Name, err)
+			return usageError(stderr, cfg.Name, err, cfg.OmitHelpHint)
 		}
 	}
 
@@ -258,7 +264,7 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	// cannot name a second cluster for the same call.
 	if sel := kube.SelectionFrom(ctx); sel.Target != nil {
 		if scope.Kubeconfig != "" || kubeconfigDir != "" || scope.Context != "" || contextsRaw != "" {
-			return usageError(stderr, cfg.Name, fmt.Errorf("--kubeconfig and --context do not apply: this call's cluster is %q", sel.Target.Name))
+			return usageError(stderr, cfg.Name, fmt.Errorf("--kubeconfig and --context do not apply: this call's cluster is %q", sel.Target.Name), cfg.OmitHelpHint)
 		}
 	}
 
@@ -324,7 +330,7 @@ func Run(ctx context.Context, cfg RunConfig, args []string) int {
 	scanned, err := cfg.Check(ctx, Invocation{Scope: scope, Flags: values, Args: positionals, In: stdin, Out: writer, Exemptions: exemptions})
 	if err != nil {
 		if IsUsageError(err) {
-			return usageError(stderr, cfg.Name, err)
+			return usageError(stderr, cfg.Name, err, cfg.OmitHelpHint)
 		}
 		switch {
 		case errors.Is(err, context.DeadlineExceeded):
@@ -430,7 +436,11 @@ func scopeFromValues(v FlagValues, graphBacked bool, now func() time.Time) (Scop
 	return s, nil
 }
 
-func usageError(stderr io.Writer, name string, err error) int {
+func usageError(stderr io.Writer, name string, err error, omitHelpHint bool) int {
+	if omitHelpHint {
+		fmt.Fprintf(stderr, "%s: %v\n", name, err)
+		return ExitUsage
+	}
 	fmt.Fprintf(stderr, "%s: %v\nRun '%s --help' for usage.\n", name, err, name)
 	return ExitUsage
 }
@@ -612,7 +622,7 @@ func runFleet(
 
 	for _, o := range outcomes {
 		if o.usageErr != nil {
-			return usageError(stderr, cfg.Name, o.usageErr)
+			return usageError(stderr, cfg.Name, o.usageErr, cfg.OmitHelpHint)
 		}
 	}
 

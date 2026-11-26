@@ -94,9 +94,10 @@ const storageNoProvisioner = "kubernetes.io/no-provisioner"
 // StorageCommand builds the `lookout state storage` command.
 func StorageCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "state storage",
-		MCPName: "k8s_storage_binding",
-		Summary: "When a PersistentVolumeClaim sits Pending and the pod behind it will not schedule — name the reason: a StorageClass that does not exist, no class and no cluster default, a static-only class with nothing pre-provisioned, plus the default-class ambiguity and stranded volumes behind it.",
+		Name:                    "state storage",
+		MCPName:                 "k8s_storage_binding",
+		InapplicableCommonFlags: []string{"workload"},
+		Summary:                 "When a PersistentVolumeClaim sits Pending and the pod behind it will not schedule — name the reason: a StorageClass that does not exist, no class and no cluster default, a static-only class with nothing pre-provisioned, plus the default-class ambiguity and stranded volumes behind it.",
 		Kinds: []checks.KindField{
 			checks.Kind("storage.missing_class", "the claim names a StorageClass that does not exist — it will stay Pending forever", emit.SeverityCritical),
 			checks.Kind("storage.no_default_class", "the claim names no class and the cluster has no default StorageClass", emit.SeverityCritical),

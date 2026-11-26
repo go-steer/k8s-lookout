@@ -162,9 +162,10 @@ var categoryOrder = []string{
 // New builds the `health` command around deps.
 func New(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "health",
-		MCPName: "k8s_cluster_health",
-		Summary: "\"Any issues with this cluster?\" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details, and a category whose read RBAC refuses (nodes, certs and webhooks under the built-in view role, which grants no Nodes, Secrets or webhook configurations) answers unavailable with the reason rather than failing the scan. certs also reads cert-manager Certificates where the CRD is served — never issued past a 15m first-issuance grace, renewal failed, or expiring from status.notAfter — and judges the TLS Secret a Certificate writes as that Certificate, not twice. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.",
+		Name:                    "health",
+		MCPName:                 "k8s_cluster_health",
+		InapplicableCommonFlags: []string{"workload"},
+		Summary:                 "\"Any issues with this cluster?\" in one call: a twelve-category scorecard (control-plane, nodes, crash loops, pending, rollouts, storage, add-ons, quotas, certs, webhooks, Service routing, and disruption readiness) — every category answers healthy|degraded|unavailable, degraded ones with details, and a category whose read RBAC refuses (nodes, certs and webhooks under the built-in view role, which grants no Nodes, Secrets or webhook configurations) answers unavailable with the reason rather than failing the scan. certs also reads cert-manager Certificates where the CRD is served — never issued past a 15m first-issuance grace, renewal failed, or expiring from status.notAfter — and judges the TLS Secret a Certificate writes as that Certificate, not twice. With --store, findings merge the sentinel's open triage-status records (§9.4): a scan mid-incident reports the diagnosis and the agent's severity judgment, not a fresh unknown.",
 		Flags: []emit.FlagSpec{
 			{Name: "top", Type: emit.FlagInt, Default: "3",
 				Help: "how many findings to name inline on a degraded category's scorecard line"},

@@ -108,9 +108,10 @@ var nodePoolLabels = []string{"cloud.google.com/gke-nodepool", "eks.amazonaws.co
 // consolidating, but nothing would have removed it automatically.
 func ScaledownCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "stab scaledown",
-		MCPName: "k8s_scaledown_blockers",
-		Summary: "On a cluster-autoscaled cluster, which underused nodes the autoscaler cannot remove and what pins each one — a cost read: nodes requested below --utilization (the autoscaler's own 50% default) that carry a zero-disruption PDB, a controller-less pod, or a safe-to-evict=false pod; scanned counts nodes examined.",
+		Name:                    "stab scaledown",
+		MCPName:                 "k8s_scaledown_blockers",
+		InapplicableCommonFlags: []string{"namespace", "A", "workload"},
+		Summary:                 "On a cluster-autoscaled cluster, which underused nodes the autoscaler cannot remove and what pins each one — a cost read: nodes requested below --utilization (the autoscaler's own 50% default) that carry a zero-disruption PDB, a controller-less pod, or a safe-to-evict=false pod; scanned counts nodes examined.",
 		Flags: []emit.FlagSpec{
 			{Name: "utilization", Type: emit.FlagInt, Default: fmt.Sprint(defaultScaledownUtilization),
 				Help: "percent of allocatable (requests, max of CPU and memory; GPU alone on GPU nodes) below which a node counts as underused; default 50 is the cluster autoscaler's own --scale-down-utilization-threshold, so match it if yours is tuned (1-100)"},

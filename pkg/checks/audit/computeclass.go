@@ -84,10 +84,11 @@ func isBuiltInComputeClass(name string) bool {
 // single-zone nodepool posture checks.
 func ComputeClassCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:        "audit computeclass",
-		MCPName:     "k8s_audit_computeclass",
-		MCPProfiles: []string{"audit"},
-		Summary:     "GKE ComputeClass, hardware-placement, and node-pool zone posture: workloads referencing a non-existent ComputeClass (`ComputeClassMissing`), workloads requesting a compute class or accelerator that matches zero nodes without node-pool auto-creation (`ComputeClassNoMatchingNodes`), multi-replica workloads pinned directly to Spot nodes without a ComputeClass fallback chain (`SpotWithoutFallback`), accelerator workloads pinned to a zone that hosts no matching accelerator nodes while other zones do (`UnsatisfiableZoneWithAccelerator`), and multi-node pools confined to a single availability zone (`SingleZoneNodePool`). Scope with --namespace, -A, or --workload.",
+		Name:                    "audit computeclass",
+		MCPName:                 "k8s_audit_computeclass",
+		MCPProfiles:             []string{"audit"},
+		MCPDefaultAllNamespaces: true,
+		Summary:                 "GKE ComputeClass, hardware-placement, and node-pool zone posture: workloads referencing a non-existent ComputeClass (`ComputeClassMissing`), workloads requesting a compute class or accelerator that matches zero nodes without node-pool auto-creation (`ComputeClassNoMatchingNodes`), multi-replica workloads pinned directly to Spot nodes without a ComputeClass fallback chain (`SpotWithoutFallback`), accelerator workloads pinned to a zone that hosts no matching accelerator nodes while other zones do (`UnsatisfiableZoneWithAccelerator`), and multi-node pools confined to a single availability zone (`SingleZoneNodePool`). Scope with --namespace, -A, or --workload.",
 		Flags: append([]emit.FlagSpec{
 			skipSystemNamespacesFlag(),
 		}, PolicyFlags()...),

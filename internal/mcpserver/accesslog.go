@@ -145,13 +145,16 @@ type callRecord struct {
 	// truncated is how many findings the --max-response-bytes cut left
 	// out of the response (#747); 0 when it was returned whole.
 	truncated int
+	// elicit names the elicitation prompt emitted when the call paused
+	// to ask the client for input (e.g. "cluster" for cluster choice,
+	// #867); empty on normal completions.
+	elicit string
 }
 
-// record writes one call. truncated= is the last field, after
-// cluster=, for the same reason each field before it was appended last:
-// a parser written before it sees every field it knew in the place it
-// knew it. It is omitted when nothing was cut, so most lines are
-// unchanged.
+// record writes one call. Additive fields (remote=, caller=, cluster=,
+// truncated=, elicit=) are appended in order at the end so a parser
+// written before each addition sees every earlier field where it
+// expects it. Empty/zero optional fields are omitted.
 func (l *AccessLog) record(r callRecord) {
 	if l == nil {
 		return
@@ -180,6 +183,9 @@ func (l *AccessLog) record(r callRecord) {
 	}
 	if r.truncated > 0 {
 		fields = append(fields, emit.Field{Key: "truncated", Value: fmt.Sprint(r.truncated)})
+	}
+	if r.elicit != "" {
+		fields = append(fields, emit.Field{Key: "elicit", Value: r.elicit})
 	}
 	line := emit.EncodeLogfmt(fields)
 	_, _ = l.out.Write(line)

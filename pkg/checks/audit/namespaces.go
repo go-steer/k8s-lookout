@@ -59,11 +59,13 @@ func NamespacesCommand(deps Deps) checks.Command {
 	}
 	flags = append(flags, PolicyFlags()...)
 	return checks.Command{
-		Name:        "audit namespaces",
-		MCPName:     "k8s_audit_namespaces",
-		MCPProfiles: []string{"audit"},
-		Summary:     "Audit workload-bearing namespaces for ResourceQuotas, LimitRanges, and required onboarding labels. Scope with --namespace or -A.",
-		Flags:       flags,
+		Name:                    "audit namespaces",
+		MCPName:                 "k8s_audit_namespaces",
+		MCPProfiles:             []string{"audit"},
+		MCPDefaultAllNamespaces: true,
+		InapplicableCommonFlags: []string{"workload"},
+		Summary:                 "Audit workload-bearing namespaces for ResourceQuotas, LimitRanges, and required onboarding labels. Scope with --namespace or -A.",
+		Flags:                   flags,
 		Kinds: []checks.KindField{
 			checks.Kind(kindNoResourceQuota, "workload-bearing namespace has no ResourceQuota or a ResourceQuota is >= 90% of hard limit", emit.SeverityWarning, emit.SeverityInfo),
 			checks.Kind(kindNoLimitRange, "workload-bearing namespace has no LimitRange while containers omit resource requests/limits", emit.SeverityInfo),

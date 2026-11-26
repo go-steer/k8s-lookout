@@ -80,11 +80,12 @@ var inferenceServerTokens = []string{
 // scheduling posture across workload templates.
 func AICommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:           "audit ai",
-		MCPName:        "k8s_audit_ai",
-		MCPProfiles:    []string{"audit"},
-		TimeoutDefault: 30 * time.Second,
-		Summary:        "Inference-workload security and scheduling posture across workload templates: serving Services in namespaces with no ingress NetworkPolicy isolating the model endpoint, hostNetwork on accelerator workloads, hostPath model-cache volumes, default ServiceAccount token automount on accelerator workloads, and unpinned model-loader or inference images. Scope with --namespace, -A, or --workload.",
+		Name:                    "audit ai",
+		MCPName:                 "k8s_audit_ai",
+		MCPProfiles:             []string{"audit"},
+		MCPDefaultAllNamespaces: true,
+		TimeoutDefault:          30 * time.Second,
+		Summary:                 "Inference-workload security and scheduling posture across workload templates: serving Services in namespaces with no ingress NetworkPolicy isolating the model endpoint, hostNetwork on accelerator workloads, hostPath model-cache volumes, default ServiceAccount token automount on accelerator workloads, and unpinned model-loader or inference images. Scope with --namespace, -A, or --workload.",
 		Flags: append([]emit.FlagSpec{
 			skipSystemNamespacesFlag(),
 		}, PolicyFlags()...),

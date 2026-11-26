@@ -33,6 +33,32 @@ import (
 // because a server that quietly hid tools would be a worse failure
 // than an expensive one; the win is opt-in.
 
+// ServerFlags records which operator-pinned path flags are configured
+// on `lookout mcp` (empty = unset). Tools declaring
+// checks.Command.MCPRequiresServerFlag are omitted from the advertised
+// surface when their required flag is unset, because server-scoped
+// path flags are stripped from MCP input schemas and calling such a
+// tool without the flag is a guaranteed error (#867).
+type ServerFlags struct {
+	Exemptions string
+	Store      string
+}
+
+// satisfies reports whether f provides the server-scoped flag c needs
+// to run on MCP.
+func (f ServerFlags) satisfies(c checks.Command) bool {
+	switch c.MCPRequiresServerFlag {
+	case "":
+		return true
+	case "exemptions":
+		return f.Exemptions != ""
+	case "store":
+		return f.Store != ""
+	default:
+		return false
+	}
+}
+
 // ResolveTools returns the set of MCP tool names to advertise for a
 // --profile and --tools selection, or nil for "everything" — the
 // default, and what New advertises when given no selection.
@@ -53,6 +79,21 @@ import (
 // cannot tell an explicit full selection from the default and does
 // not need to.
 func ResolveTools(reg *checks.Registry, profile, tools string) (map[string]bool, error) {
+	return resolveTools(reg, profile, tools, nil)
+}
+
+// ResolveToolsFor is ResolveTools aware of the operator's server-scoped
+// path flags (--exemptions, --store). Wildcards (`all`/`full`) and
+// profile names silently omit tools whose required server flag is unset
+// (#867); removals (`-<tool>`) remain valid no-ops so existing
+// `--tools=-k8s_audit_exemptions` / `-k8s_findings_diff` configs keep
+// working; explicitly adding an unconfigured tool by name fails with a
+// clear error naming the missing flag.
+func ResolveToolsFor(reg *checks.Registry, profile, tools string, flags ServerFlags) (map[string]bool, error) {
+	return resolveTools(reg, profile, tools, &flags)
+}
+
+func resolveTools(reg *checks.Registry, profile, tools string, flags *ServerFlags) (map[string]bool, error) {
 	spec := strings.TrimSpace(profile)
 	if t := strings.TrimSpace(tools); t != "" {
 		if spec == "" {
@@ -91,7 +132,7 @@ func ResolveTools(reg *checks.Registry, profile, tools string) (map[string]bool,
 		if privileged[tok] {
 			return nil, fmt.Errorf("%q changes a workload and is never selected by --profile/--tools; the operator enables it with its own `lookout mcp` flag (see `lookout mcp --help`)", tok)
 		}
-		names, err := expand(tok, advertisable)
+		names, err := expand(tok, advertisable, flags, remove)
 		if err != nil {
 			return nil, err
 		}
@@ -113,10 +154,13 @@ func ResolveTools(reg *checks.Registry, profile, tools string) (map[string]bool,
 }
 
 // expand resolves one selection token to the tool names it names.
-func expand(tok string, advertisable map[string]checks.Command) ([]string, error) {
+func expand(tok string, advertisable map[string]checks.Command, flags *ServerFlags, remove bool) ([]string, error) {
 	if tok == "all" || tok == checks.ProfileFull {
 		out := make([]string, 0, len(advertisable))
-		for name := range advertisable {
+		for name, c := range advertisable {
+			if flags != nil && !remove && !flags.satisfies(c) {
+				continue
+			}
 			out = append(out, name)
 		}
 		sort.Strings(out)
@@ -124,20 +168,32 @@ func expand(tok string, advertisable map[string]checks.Command) ([]string, error
 	}
 	if checks.MCPProfileSummary(tok) != "" {
 		var out []string
+		members := 0
 		for name, c := range advertisable {
 			if c.InMCPProfile(tok) {
+				members++
+				if flags != nil && !remove && !flags.satisfies(c) {
+					continue
+				}
 				out = append(out, name)
 			}
 		}
 		sort.Strings(out)
-		if len(out) == 0 {
+		if members == 0 {
 			// Registration validates that a profile name exists; it
 			// cannot validate that anything joined it.
 			return nil, fmt.Errorf("profile %q has no members — nothing declares MCPProfiles: []string{%q}", tok, tok)
 		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("profile %q has no tools configured for this server's flags (pass the required --store or --exemptions flag)", tok)
+		}
 		return out, nil
 	}
-	if _, ok := advertisable[tok]; ok {
+	if c, ok := advertisable[tok]; ok {
+		if flags != nil && !remove && !flags.satisfies(c) {
+			return nil, fmt.Errorf("%q requires --%s=<path> on lookout mcp; without it the tool cannot run (pass --%s=<path> or omit %q from --tools)",
+				c.MCPName, c.MCPRequiresServerFlag, c.MCPRequiresServerFlag, c.MCPName)
+		}
 		return []string{tok}, nil
 	}
 	return nil, fmt.Errorf("%q is neither a tool nor a profile (profiles: %s, all; tools: run `lookout mcp --list-tools`)",
@@ -159,7 +215,7 @@ func ProfileHelp(reg *checks.Registry) string {
 			fmt.Fprintf(&b, "           %s\n", l)
 		}
 	}
-	line(checks.ProfileFull, "every registered command; the default, and what every client that asks for nothing gets")
+	line(checks.ProfileFull, "every configured command (omitting tools whose required --exemptions/--store flag is unset); the default")
 	for _, name := range checks.MCPProfileNames() {
 		line(name, checks.MCPProfileSummary(name))
 	}

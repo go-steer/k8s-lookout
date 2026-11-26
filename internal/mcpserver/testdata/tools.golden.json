@@ -4,7 +4,7 @@
       "idempotentHint": false,
       "readOnlyHint": true
     },
-    "description": "Synthetic positional command covering every flag type; test scaffolding only.\nOutput: one finding per line (logfmt; format=json for JSON), terminated by the mandatory summary line scanned=\u003cn\u003e findings=\u003cn\u003e elapsed=\u003cd\u003e — findings=0 with a summary present means scanned-and-healthy; a result without a summary line is void.\nFields beyond the shared envelope (kind, severity, namespace, kind_of_object, name, reason, message, fingerprint, exempt_reason, exempt_expires): target — the positional argument as received; grace — the parsed --grace value.",
+    "description": "Synthetic positional command covering every flag type; test scaffolding only.\nOutput: one finding per line (logfmt; format=json for JSON), terminated by the mandatory summary line scanned=\u003cn\u003e findings=\u003cn\u003e elapsed=\u003cd\u003e — findings=0 with a summary present means scanned-and-healthy; a result without a summary line is void.\nFields beyond the shared envelope (kind, severity, namespace, kind_of_object, name, reason, message, fingerprint, exempt_reason, exempt_expires): target — the positional argument as received; grace — the parsed grace value.",
     "inputSchema": {
       "properties": {
         "all_namespaces": {
@@ -45,7 +45,7 @@
           "type": "integer"
         },
         "target": {
-          "description": "\u003cKind\u003e/[\u003cnamespace\u003e/]\u003cname\u003e — the one resource to read; namespace defaults to --namespace",
+          "description": "\u003cKind\u003e/[\u003cnamespace\u003e/]\u003cname\u003e — the one resource to read; namespace defaults to namespace",
           "type": "string"
         },
         "timeout": {
@@ -90,7 +90,7 @@
           "type": "string"
         },
         "hang": {
-          "description": "block until the --timeout context fires",
+          "description": "block until the timeout context fires",
           "type": "boolean"
         },
         "namespace": {

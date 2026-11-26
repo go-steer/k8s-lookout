@@ -111,10 +111,12 @@ const (
 // precisely this consequence spelled out in its message.
 func NetpolCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:        "audit netpol",
-		MCPName:     "k8s_audit_netpol",
-		MCPProfiles: []string{"audit"},
-		Summary:     "NetworkPolicy coverage posture: namespaces where nothing restricts ingress or egress at all, and individual workloads that fell through the selectors of the policies covering their neighbours, and individual policies whose selector matches no workload at all. Coverage means isolation — some policy selects the pod and names the direction — not that the rules it then applies are tight. hostNetwork templates are excluded, since NetworkPolicy cannot constrain them. Scope with --namespace or -A; scanned counts pod templates examined.",
+		Name:                    "audit netpol",
+		MCPName:                 "k8s_audit_netpol",
+		MCPProfiles:             []string{"audit"},
+		MCPDefaultAllNamespaces: true,
+		InapplicableCommonFlags: []string{"workload"},
+		Summary:                 "NetworkPolicy coverage posture: namespaces where nothing restricts ingress or egress at all, and individual workloads that fell through the selectors of the policies covering their neighbours, and individual policies whose selector matches no workload at all. Coverage means isolation — some policy selects the pod and names the direction — not that the rules it then applies are tight. hostNetwork templates are excluded, since NetworkPolicy cannot constrain them. Scope with --namespace or -A; scanned counts pod templates examined.",
 		Flags: append([]emit.FlagSpec{
 			skipSystemNamespacesFlag(),
 		}, PolicyFlags()...),

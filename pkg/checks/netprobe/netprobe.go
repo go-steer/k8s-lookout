@@ -155,12 +155,13 @@ func probeOutput() []checks.OutputField {
 // New builds the `net probe` command around deps.
 func New(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "net probe",
-		MCPName: "k8s_net_probe",
-		Summary: "Actively confirm a network hypothesis — resolve DNS names, open TCP connections, GET HTTP(S) URLs — from wherever lookout runs (in a pod = the in-cluster view); zero cluster mutation, no pods spawned.",
-		Local:   true,
-		Flags:   probeFlags(),
-		Kinds:   probeKinds(),
+		Name:                    "net probe",
+		MCPName:                 "k8s_net_probe",
+		InapplicableCommonFlags: []string{"namespace", "A", "workload", "since"},
+		Summary:                 "Actively confirm a network hypothesis — resolve DNS names, open TCP connections, GET HTTP(S) URLs — from wherever lookout runs (in a pod = the in-cluster view); zero cluster mutation, no pods spawned.",
+		Local:                   true,
+		Flags:                   probeFlags(),
+		Kinds:                   probeKinds(),
 		Output: append([]checks.OutputField{
 			{Name: "vantage", Doc: "where the probe ran from: always local here (wherever this lookout process runs); `net probe-from` results say pod:<namespace>/<name>"},
 		}, probeOutput()...),

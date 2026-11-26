@@ -46,9 +46,10 @@ import (
 // common -A flag is repurposed to mean "all nodes".
 func DrainCommand(deps Deps) checks.Command {
 	return checks.Command{
-		Name:    "stab drain",
-		MCPName: "k8s_drain_blockers",
-		Summary: "Before draining a node, list everything that will block the drain (PDBs at disruptionsAllowed=0) or be destroyed by it (bare pods, emptyDir data, single-replica workloads); --node details one node, -A means all nodes here (pods are always examined across all namespaces); scanned counts pods examined after the standard-drain skips (mirror/DaemonSet/completed pods).",
+		Name:                    "stab drain",
+		MCPName:                 "k8s_drain_blockers",
+		InapplicableCommonFlags: []string{"namespace", "workload"},
+		Summary:                 "Before draining a node, list everything that will block the drain (PDBs at disruptionsAllowed=0) or be destroyed by it (bare pods, emptyDir data, single-replica workloads); --node details one node, -A means all nodes here (pods are always examined across all namespaces); scanned counts pods examined after the standard-drain skips (mirror/DaemonSet/completed pods).",
 		Flags: []emit.FlagSpec{
 			{Name: "node", Type: emit.FlagString, Default: "",
 				Help: "analyze one node in detail: every blocker on it becomes its own finding. Exactly one of --node or -A (all-nodes summary) is required."},
