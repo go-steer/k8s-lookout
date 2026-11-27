@@ -125,7 +125,8 @@ uat_root_dispatch() {
   # Enumerated, not listed by hand (like uat-cases/00-contract.sh): a
   # group that exists in the registry but never reaches the root's
   # usage text is undiscoverable, and nothing else in the suite would
-  # notice. The read-path groups come from `mcp --list-tools`; watch
+  # notice. The read-path groups come from `uat_read_commands`
+  # (`mcp --store=/dev/null --exemptions=/dev/null --list-tools`); watch
   # and version are the two commands that are not read-path checks.
   uat_run --help
   local help="$UAT_OUT"

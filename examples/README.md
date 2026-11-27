@@ -256,10 +256,10 @@ that fires on everything looks identical to one that fires correctly.
 See [§ Fixtures](../docs/testing/cli-uat.md#fixtures).
 
 The cross-cutting case (`uat-cases/00-contract.sh`) enumerates commands
-from the registry via `lookout mcp --list-tools` rather than a list
-kept by hand, and fails if a newly registered command has no invocation
-in its table — so the coverage cannot silently rot as commands are
-added. `UAT_TIER` (default `T0`) gates cases needing more than a bare
+from the registry via `lookout mcp --store=/dev/null --exemptions=/dev/null --list-tools`
+rather than a list kept by hand, and fails if a newly registered command has
+no invocation in its table — so the coverage cannot silently rot as commands
+are added. `UAT_TIER` (default `T0`) gates cases needing more than a bare
 kind cluster; anything above the running tier is reported as skipped
 rather than failed. The design, the per-command matrix and the tier
 definitions are in [`docs/testing/cli-uat.md`](../docs/testing/cli-uat.md).

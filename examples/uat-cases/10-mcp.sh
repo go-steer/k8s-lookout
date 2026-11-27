@@ -220,36 +220,144 @@ uat_case_mcp() {
     fi
   done
 
+  uat_section "mcp: ergonomics contracts (#867)"
+
+  # Configured server tools/list count must match the full configured
+  # --list-tools registry exactly.
+  local live_cfg_n
+  live_cfg_n="$(jq -r '.result.tools | length' <<<"$tools_json" 2>/dev/null)"
+  if [[ "$live_cfg_n" == "${#commands[@]}" ]]; then
+    uat_ok "mcp → configured tools/list count matches full registry ($live_cfg_n)"
+  else
+    uat_bad "mcp → configured tools/list count matches full registry" "got $live_cfg_n, want ${#commands[@]}"
+  fi
+
+  # Inapplicable common scope properties are omitted from schemas:
+  # k8s_audit_all omits workload; k8s_audit_cluster omits namespace,
+  # all_namespaces, and workload.
+  if jq -e '.result.tools[] | select(.name=="k8s_audit_all") | .inputSchema.properties | (has("workload") | not) and has("namespace") and has("all_namespaces")' <<<"$tools_json" >/dev/null 2>&1; then
+    uat_ok "mcp → k8s_audit_all schema omits workload and keeps namespace/all_namespaces"
+  else
+    uat_bad "mcp → k8s_audit_all schema omits workload and keeps namespace/all_namespaces" \
+      "$(jq -c '.result.tools[] | select(.name=="k8s_audit_all") | .inputSchema.properties | keys' <<<"$tools_json")"
+  fi
+  if jq -e '.result.tools[] | select(.name=="k8s_audit_cluster") | .inputSchema.properties | (has("namespace") | not) and (has("all_namespaces") | not) and (has("workload") | not)' <<<"$tools_json" >/dev/null 2>&1; then
+    uat_ok "mcp → k8s_audit_cluster schema omits namespace, all_namespaces, and workload"
+  else
+    uat_bad "mcp → k8s_audit_cluster schema omits namespace, all_namespaces, and workload" \
+      "$(jq -c '.result.tools[] | select(.name=="k8s_audit_cluster") | .inputSchema.properties | keys' <<<"$tools_json")"
+  fi
+
+  # Namespace-scoped audit tools default to all_namespaces: true over MCP.
+  uat_mcp_call "k8s_audit_all" "{}"
+  local default_err
+  default_err="$(jq -r '.error.message // empty' <<<"$UAT_MCP_RESULT" 2>/dev/null)"
+  if [[ -z "$default_err" ]] && jq -e '(.result.isError // false) == false' <<<"$UAT_MCP_RESULT" >/dev/null 2>&1; then
+    local default_mcp_out default_cli_out
+    default_mcp_out="$(uat_normalize_payload <<<"$UAT_MCP_TEXT")"
+    uat_run audit all -A --exemptions="$UAT_EXEMPTIONS"
+    default_cli_out="$(uat_normalize_payload <<<"$UAT_OUT")"
+    if [[ "$default_mcp_out" == "$default_cli_out" ]]; then
+      uat_ok "mcp → k8s_audit_all with {} defaults to all_namespaces=true and matches CLI -A"
+    else
+      uat_run audit all -A --exemptions="$UAT_EXEMPTIONS"
+      local default_cli_again
+      default_cli_again="$(uat_normalize_payload <<<"$UAT_OUT")"
+      if [[ "$default_cli_again" != "$default_cli_out" ]]; then
+        uat_skipped "mcp → k8s_audit_all with {} matches CLI -A" "cluster moved between identical CLI calls"
+      else
+        uat_bad "mcp → k8s_audit_all with {} defaults to all_namespaces=true and matches CLI -A" \
+          "$(diff <(echo "$default_cli_out") <(echo "$default_mcp_out") | head -12)"
+      fi
+    fi
+  else
+    uat_bad "mcp → k8s_audit_all with {} defaults to all_namespaces=true" "error: ${default_err:-$UAT_MCP_RESULT}"
+  fi
+
+  # Passing a stripped property returns JSON-RPC InvalidParams (-32602)
+  # without the CLI `Run 'lookout ... --help'` trailer.
+  uat_mcp_call "k8s_audit_all" '{"workload":"Deployment/default/api"}'
+  local rej_code rej_msg
+  rej_code="$(jq -r '.error.code // empty' <<<"$UAT_MCP_RESULT" 2>/dev/null)"
+  rej_msg="$(jq -r '.error.message // empty' <<<"$UAT_MCP_RESULT" 2>/dev/null)"
+  if [[ "$rej_code" == "-32602" && "$rej_msg" == *'unknown argument "workload"'* && "$rej_msg" != *"Run 'lookout"* ]]; then
+    uat_ok "mcp → k8s_audit_all rejects stripped workload with MCP-worded InvalidParams"
+  else
+    uat_bad "mcp → k8s_audit_all rejects stripped workload with MCP-worded InvalidParams" \
+      "code=$rej_code msg=$rej_msg"
+  fi
+
+  # Exercising an emit.Run ExitUsage error over live MCP (explicit
+  # all_namespaces=false with no namespace) must use MCP property names
+  # and omit the CLI `Run 'lookout ... --help'` trailer (#867).
+  uat_mcp_call "k8s_audit_all" '{"all_namespaces":false}'
+  local usage_code usage_msg
+  usage_code="$(jq -r '.error.code // empty' <<<"$UAT_MCP_RESULT" 2>/dev/null)"
+  usage_msg="$(jq -r '.error.message // empty' <<<"$UAT_MCP_RESULT" 2>/dev/null)"
+  if [[ "$usage_code" == "-32602" && "$usage_msg" == *"namespace"* && "$usage_msg" == *"all_namespaces"* && "$usage_msg" != *"Run 'lookout"* ]]; then
+    uat_ok "mcp → k8s_audit_all usage error uses MCP property names and omits --help hint"
+  else
+    uat_bad "mcp → k8s_audit_all usage error uses MCP property names and omits --help hint" \
+      "code=$usage_code msg=$usage_msg"
+  fi
+
   uat_mcp_stop
+
+  # Unconfigured live server (no --store, no --exemptions) must omit
+  # k8s_audit_exemptions and k8s_findings_diff from tools/list, retain
+  # k8s_triage_status/k8s_cluster_health/k8s_findings_ack, and match bare
+  # `lookout mcp --list-tools`.
+  if ! uat_mcp_start; then
+    uat_bad "mcp unconfigured server starts on loopback" "no session id after 10s" "$(cat "$UAT_MCP_LOG" 2>/dev/null)"
+  else
+    local bare_tools_json live_bare_n cli_bare_n
+    bare_tools_json="$(uat_mcp_raw '{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}')"
+    live_bare_n="$(jq -r '.result.tools | length' <<<"$bare_tools_json" 2>/dev/null)"
+    cli_bare_n="$(uat_mcp_clean --list-tools 2>/dev/null | grep -c '^k8s_' || true)"
+    if [[ "$live_bare_n" == "$cli_bare_n" && "$live_bare_n" == $((${#commands[@]} - 2)) ]]; then
+      uat_ok "mcp → unconfigured tools/list count matches bare --list-tools ($live_bare_n)"
+    else
+      uat_bad "mcp → unconfigured tools/list count matches bare --list-tools" \
+        "live=$live_bare_n cli=$cli_bare_n full=${#commands[@]}"
+    fi
+    if jq -e '([.result.tools[].name] | (index("k8s_audit_exemptions") == null) and (index("k8s_findings_diff") == null) and (index("k8s_triage_status") != null) and (index("k8s_cluster_health") != null) and (index("k8s_findings_ack") != null))' <<<"$bare_tools_json" >/dev/null 2>&1; then
+      uat_ok "mcp → unconfigured tools/list omits server-flag tools and keeps store-optional ones"
+    else
+      uat_bad "mcp → unconfigured tools/list omits server-flag tools and keeps store-optional ones" \
+        "$(jq -c '[.result.tools[].name]' <<<"$bare_tools_json")"
+    fi
+    uat_mcp_stop
+  fi
 
   uat_section "mcp: a bind flag must not open an unauthenticated cluster-read API"
 
   # The whole surface reads the cluster, so the refusal is the security
   # property, not a convenience. Assert it is refused as a USAGE error
   # rather than accepted-and-warned.
-  uat_run mcp --listen=0.0.0.0:0
+  uat_run_mcp --listen=0.0.0.0:0
   uat_expect_exit 2 "mcp → refuses a non-loopback bind"
   uat_expect_stderr 'loopback' "mcp → says why it refused"
 
   # Each of the three flags alone is still a refusal: the point is that
   # opting in does not on its own make the bind safe.
-  uat_run mcp --listen=0.0.0.0:0 --allow-non-loopback
+  uat_run_mcp --listen=0.0.0.0:0 --allow-non-loopback
   uat_expect_exit 2 "mcp → --allow-non-loopback alone is still refused"
 
   local token_file="$UAT_WORKDIR/mcp-token" access_log="$UAT_WORKDIR/mcp-access.log"
   echo "uat-secret-token" >"$token_file"
   chmod 600 "$token_file"
 
-  uat_run mcp --listen=0.0.0.0:0 --allow-non-loopback --auth-token-file="$token_file"
+  uat_run_mcp --listen=0.0.0.0:0 --allow-non-loopback --auth-token-file="$token_file"
   uat_expect_exit 2 "mcp → without --access-log it is still refused"
 
   uat_section "mcp: the off-host bind authenticates"
 
   # All three flags together is the one accepted off-host configuration,
   # so this is where the 401 has to hold.
-  local port
+  local port bin
   port="$(uat_free_port)"
-  "$(lookout_bin)" mcp --listen="0.0.0.0:$port" --allow-non-loopback \
+  bin="$(lookout_bin)"
+  env "${UAT_MCP_CLEAN_ENV[@]}" "$bin" mcp --listen="0.0.0.0:$port" --allow-non-loopback \
     --auth-token-file="$token_file" --access-log="$access_log" \
     >"$UAT_WORKDIR/mcp-offhost.log" 2>&1 &
   local off_pid=$!
@@ -343,10 +451,11 @@ uat_case_mcp() {
 
   # Every tool costs tokens and choice accuracy on every model call, so
   # a profile that quietly served everything would be a real cost bug.
-  local full_n audit_n triage_n
-  full_n="$(run_lookout mcp --list-tools 2>/dev/null | grep -c '^k8s_')"
-  audit_n="$(run_lookout mcp --profile=audit --list-tools 2>/dev/null | grep -c '^k8s_')"
-  triage_n="$(run_lookout mcp --profile=triage --list-tools 2>/dev/null | grep -c '^k8s_')"
+  local full_out full_n audit_n triage_n
+  full_out="$(uat_mcp_clean --list-tools 2>/dev/null)"
+  full_n="$(grep -c '^k8s_' <<<"$full_out" || true)"
+  audit_n="$(uat_mcp_clean --profile=audit --list-tools 2>/dev/null | grep -c '^k8s_' || true)"
+  triage_n="$(uat_mcp_clean --profile=triage --list-tools 2>/dev/null | grep -c '^k8s_' || true)"
 
   if ((audit_n > 0 && audit_n < full_n)); then
     uat_ok "mcp → --profile=audit narrows the surface ($audit_n of $full_n)"
@@ -359,22 +468,193 @@ uat_case_mcp() {
     uat_bad "mcp → --profile=triage narrows the surface" "triage=$triage_n full=$full_n"
   fi
 
+  # Server-scoped flag gating matrix (#867): bare --list-tools omits
+  # k8s_audit_exemptions and k8s_findings_diff; each flag unlocks its
+  # own tool; both together restore the full read-path registry.
+  if grep -q '^k8s_audit_exemptions ' <<<"$full_out" || grep -q '^k8s_findings_diff ' <<<"$full_out"; then
+    uat_bad "mcp → bare --list-tools omits k8s_audit_exemptions and k8s_findings_diff" \
+      "$(grep -E '^k8s_(audit_exemptions|findings_diff) ' <<<"$full_out")"
+  else
+    uat_ok "mcp → bare --list-tools omits k8s_audit_exemptions and k8s_findings_diff"
+  fi
+
+  local ex_out ex_n st_out st_n both_out both_n audit_ex_n audit_st_n triage_st_out triage_st_n triage_ex_n
+  ex_out="$(uat_mcp_clean --exemptions=/dev/null --list-tools 2>/dev/null)"
+  ex_n="$(grep -c '^k8s_' <<<"$ex_out" || true)"
+  if ((ex_n == full_n + 1)) && grep -q '^k8s_audit_exemptions ' <<<"$ex_out" && ! grep -q '^k8s_findings_diff ' <<<"$ex_out"; then
+    uat_ok "mcp → --exemptions adds k8s_audit_exemptions only ($ex_n)"
+  else
+    uat_bad "mcp → --exemptions adds k8s_audit_exemptions only" "got=$ex_n want=$((full_n + 1))"
+  fi
+
+  st_out="$(uat_mcp_clean --store=/dev/null --list-tools 2>/dev/null)"
+  st_n="$(grep -c '^k8s_' <<<"$st_out" || true)"
+  if ((st_n == full_n + 1)) && grep -q '^k8s_findings_diff ' <<<"$st_out" && ! grep -q '^k8s_audit_exemptions ' <<<"$st_out"; then
+    uat_ok "mcp → --store adds k8s_findings_diff only ($st_n)"
+  else
+    uat_bad "mcp → --store adds k8s_findings_diff only" "got=$st_n want=$((full_n + 1))"
+  fi
+
+  both_out="$(uat_mcp_clean --exemptions=/dev/null --store=/dev/null --list-tools 2>/dev/null)"
+  both_n="$(grep -c '^k8s_' <<<"$both_out" || true)"
+  if ((both_n == full_n + 2)) && grep -q '^k8s_audit_exemptions ' <<<"$both_out" && grep -q '^k8s_findings_diff ' <<<"$both_out"; then
+    uat_ok "mcp → --exemptions + --store adds both gated tools ($both_n)"
+  else
+    uat_bad "mcp → --exemptions + --store adds both gated tools" "got=$both_n want=$((full_n + 2))"
+  fi
+
+  audit_ex_n="$(uat_mcp_clean --profile=audit --exemptions=/dev/null --list-tools 2>/dev/null | grep -c '^k8s_' || true)"
+  audit_st_n="$(uat_mcp_clean --profile=audit --store=/dev/null --list-tools 2>/dev/null | grep -c '^k8s_' || true)"
+  if ((audit_ex_n == audit_n + 1 && audit_st_n == audit_n)); then
+    uat_ok "mcp → --profile=audit gains k8s_audit_exemptions with --exemptions only ($audit_n → $audit_ex_n)"
+  else
+    uat_bad "mcp → --profile=audit gains k8s_audit_exemptions with --exemptions only" \
+      "base=$audit_n with_exemptions=$audit_ex_n with_store=$audit_st_n"
+  fi
+
+  triage_st_out="$(uat_mcp_clean --profile=triage --store=/dev/null --list-tools 2>/dev/null)"
+  triage_st_n="$(grep -c '^k8s_' <<<"$triage_st_out" || true)"
+  triage_ex_n="$(uat_mcp_clean --profile=triage --exemptions=/dev/null --list-tools 2>/dev/null | grep -c '^k8s_' || true)"
+  if ((triage_st_n == triage_n + 1 && triage_ex_n == triage_n)) && grep -q '^k8s_findings_diff ' <<<"$triage_st_out"; then
+    uat_ok "mcp → --profile=triage gains k8s_findings_diff with --store only ($triage_n → $triage_st_n)"
+  else
+    uat_bad "mcp → --profile=triage gains k8s_findings_diff with --store only" \
+      "base=$triage_n with_store=$triage_st_n with_exemptions=$triage_ex_n"
+  fi
+
   # --tools is documented as left-to-right over the profile, so a
   # removal has to actually remove.
   local minus_n
-  minus_n="$(run_lookout mcp --profile=triage --tools=-k8s_triage_logs --list-tools 2>/dev/null | grep -c '^k8s_')"
+  minus_n="$(uat_mcp_clean --profile=triage --tools=-k8s_triage_logs --list-tools 2>/dev/null | grep -c '^k8s_' || true)"
   if ((minus_n == triage_n - 1)); then
     uat_ok "mcp → --tools=-<name> removes one from the profile ($minus_n of $triage_n)"
   else
     uat_bad "mcp → --tools=-<name> removes one from the profile" "got $minus_n, want $((triage_n - 1))"
   fi
-  if run_lookout mcp --profile=triage --tools=-k8s_triage_logs --list-tools 2>/dev/null | grep -q '^k8s_triage_logs'; then
+  if uat_mcp_clean --profile=triage --tools=-k8s_triage_logs --list-tools 2>/dev/null | grep -q '^k8s_triage_logs'; then
     uat_bad "mcp → the removed tool is really gone" "k8s_triage_logs is still advertised"
   else
     uat_ok "mcp → the removed tool is really gone"
   fi
 
-  # An unknown name is a usage error, not a silently empty surface.
-  uat_run mcp --tools=k8s_no_such_tool --list-tools
+  # Removing an already-omitted server-flag tool stays a valid no-op for
+  # existing configs; positively requesting one without its flag exits 2.
+  uat_run_mcp --profile=audit --tools=-k8s_audit_exemptions --list-tools
+  uat_expect_exit 0 "mcp → --tools=-k8s_audit_exemptions without --exemptions is a valid no-op"
+  uat_run_mcp --tools=all,-k8s_findings_diff --list-tools
+  uat_expect_exit 0 "mcp → --tools=all,-k8s_findings_diff without --store is a valid no-op"
+
+  uat_run_mcp --tools=k8s_audit_exemptions --list-tools
+  uat_expect_exit 2 "mcp → explicit k8s_audit_exemptions without --exemptions is a usage error"
+  uat_expect_stderr '--exemptions' "mcp → missing --exemptions names the flag"
+
+  uat_run_mcp --tools=k8s_findings_diff --list-tools
+  uat_expect_exit 2 "mcp → explicit k8s_findings_diff without --store is a usage error"
+  uat_expect_stderr '--store' "mcp → missing --store names the flag"
+
+  uat_run_mcp --exemptions=/dev/null --tools=k8s_audit_exemptions --list-tools
+  uat_expect_exit 0 "mcp → explicit k8s_audit_exemptions with --exemptions succeeds"
+  if [[ "$(grep -c '^k8s_' <<<"$UAT_OUT" || true)" == "1" ]] && grep -q '^k8s_audit_exemptions ' <<<"$UAT_OUT"; then
+    uat_ok "mcp → --exemptions --tools=k8s_audit_exemptions advertises exactly 1 tool"
+  else
+    uat_bad "mcp → --exemptions --tools=k8s_audit_exemptions advertises exactly 1 tool" "$UAT_OUT"
+  fi
+
+  uat_run_mcp --store=/dev/null --tools=k8s_findings_diff --list-tools
+  uat_expect_exit 0 "mcp → explicit k8s_findings_diff with --store succeeds"
+  if [[ "$(grep -c '^k8s_' <<<"$UAT_OUT" || true)" == "1" ]] && grep -q '^k8s_findings_diff ' <<<"$UAT_OUT"; then
+    uat_ok "mcp → --store --tools=k8s_findings_diff advertises exactly 1 tool"
+  else
+    uat_bad "mcp → --store --tools=k8s_findings_diff advertises exactly 1 tool" "$UAT_OUT"
+  fi
+
+  # Privileged opt-in: --probe-from-image (digest-pinned) adds
+  # k8s_net_probe_from; tag-only refs and bare --tools=k8s_net_probe_from fail.
+  local probe_img="ghcr.io/go-steer/lookout@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  uat_run_mcp --probe-from-image="$probe_img" --list-tools
+  uat_expect_exit 0 "mcp → digest-pinned --probe-from-image --list-tools succeeds"
+  if [[ "$(grep -c '^k8s_' <<<"$UAT_OUT" || true)" == $((full_n + 1)) ]] && grep -q '^k8s_net_probe_from ' <<<"$UAT_OUT"; then
+    uat_ok "mcp → --probe-from-image adds k8s_net_probe_from ($((full_n + 1)))"
+  else
+    uat_bad "mcp → --probe-from-image adds k8s_net_probe_from" "$UAT_OUT"
+  fi
+  uat_run_mcp --probe-from-image="$probe_img" --exemptions=/dev/null --store=/dev/null --list-tools
+  uat_expect_exit 0 "mcp → --probe-from-image + --exemptions + --store --list-tools succeeds"
+  if [[ "$(grep -c '^k8s_' <<<"$UAT_OUT" || true)" == $((both_n + 1)) ]] && grep -q '^k8s_net_probe_from ' <<<"$UAT_OUT" && grep -q '^k8s_audit_exemptions ' <<<"$UAT_OUT" && grep -q '^k8s_findings_diff ' <<<"$UAT_OUT"; then
+    uat_ok "mcp → --probe-from-image + --exemptions + --store advertises all $((both_n + 1)) tools"
+  else
+    uat_bad "mcp → --probe-from-image + --exemptions + --store advertises all $((both_n + 1)) tools" "$UAT_OUT"
+  fi
+  uat_run_mcp --profile=triage --probe-from-image="$probe_img" --list-tools
+  uat_expect_exit 0 "mcp → --profile=triage --probe-from-image --list-tools succeeds"
+  if [[ "$(grep -c '^k8s_' <<<"$UAT_OUT" || true)" == $((triage_n + 1)) ]] && grep -q '^k8s_net_probe_from ' <<<"$UAT_OUT"; then
+    uat_ok "mcp → --profile=triage --probe-from-image adds k8s_net_probe_from ($((triage_n + 1)))"
+  else
+    uat_bad "mcp → --profile=triage --probe-from-image adds k8s_net_probe_from" "$UAT_OUT"
+  fi
+  uat_run_mcp --probe-from-image=ghcr.io/go-steer/lookout:latest --list-tools
+  uat_expect_exit 2 "mcp → tag-only --probe-from-image is a usage error"
+  uat_expect_stderr '--probe-from-image' "mcp → tag-only --probe-from-image names the flag"
+  uat_run_mcp --tools=k8s_net_probe_from --list-tools
+  uat_expect_exit 2 "mcp → --tools=k8s_net_probe_from without --probe-from-image is a usage error"
+  uat_expect_stderr 'k8s_net_probe_from' "mcp → privileged tool refusal names k8s_net_probe_from"
+
+  # Multi-cluster --list-tools: adds k8s_list_clusters, combines cleanly
+  # with --tools=k8s_audit_all (2 tools), auto-enables on injected Google
+  # auth unless --kubeconfig pins single-cluster mode, and rejects invalid combinations.
+  uat_run_mcp --clusters=a=https://a --list-tools
+  uat_expect_exit 0 "mcp → --clusters --list-tools succeeds"
+  if [[ "$(grep -c '^k8s_' <<<"$UAT_OUT" || true)" == $((full_n + 1)) ]] && grep -q '^k8s_list_clusters ' <<<"$UAT_OUT"; then
+    uat_ok "mcp → --clusters adds k8s_list_clusters ($((full_n + 1)))"
+  else
+    uat_bad "mcp → --clusters adds k8s_list_clusters" "$UAT_OUT"
+  fi
+  uat_run_mcp --clusters-from=auto --tools=k8s_audit_all --list-tools
+  uat_expect_exit 0 "mcp → --clusters-from=auto --tools=k8s_audit_all --list-tools succeeds"
+  if [[ "$(grep -c '^k8s_' <<<"$UAT_OUT" || true)" == "2" ]] && grep -q '^k8s_list_clusters ' <<<"$UAT_OUT" && grep -q '^k8s_audit_all ' <<<"$UAT_OUT"; then
+    uat_ok "mcp → --clusters-from=auto --tools=k8s_audit_all advertises exactly 2 tools"
+  else
+    uat_bad "mcp → --clusters-from=auto --tools=k8s_audit_all advertises exactly 2 tools" "$UAT_OUT"
+  fi
+  uat_run_mcp --google-auth=injected --list-tools
+  uat_expect_exit 0 "mcp → --google-auth=injected --list-tools auto-enables multi-cluster"
+  if [[ "$(grep -c '^k8s_' <<<"$UAT_OUT" || true)" == $((full_n + 1)) ]] && grep -q '^k8s_list_clusters ' <<<"$UAT_OUT"; then
+    uat_ok "mcp → --google-auth=injected adds k8s_list_clusters ($((full_n + 1)))"
+  else
+    uat_bad "mcp → --google-auth=injected adds k8s_list_clusters" "$UAT_OUT"
+  fi
+  uat_run_mcp --google-auth=injected --kubeconfig=/dev/null --list-tools
+  uat_expect_exit 0 "mcp → --google-auth=injected with --kubeconfig stays single-cluster"
+  if [[ "$(grep -c '^k8s_' <<<"$UAT_OUT" || true)" == "$full_n" ]] && ! grep -q '^k8s_list_clusters ' <<<"$UAT_OUT"; then
+    uat_ok "mcp → --google-auth=injected with --kubeconfig omits k8s_list_clusters ($full_n)"
+  else
+    uat_bad "mcp → --google-auth=injected with --kubeconfig omits k8s_list_clusters" "$UAT_OUT"
+  fi
+  uat_run_mcp --clusters-from=auto --store=/dev/null --list-tools
+  uat_expect_exit 0 "mcp → --clusters-from=auto --store --list-tools succeeds"
+  if [[ "$(grep -c '^k8s_' <<<"$UAT_OUT" || true)" == $((full_n + 2)) ]] && grep -q '^k8s_list_clusters ' <<<"$UAT_OUT" && grep -q '^k8s_findings_diff ' <<<"$UAT_OUT"; then
+    uat_ok "mcp → --clusters-from=auto --store adds k8s_list_clusters and k8s_findings_diff ($((full_n + 2)))"
+  else
+    uat_bad "mcp → --clusters-from=auto --store adds k8s_list_clusters and k8s_findings_diff" "$UAT_OUT"
+  fi
+  uat_run_mcp --clusters=a=https://a --clusters-from=auto --list-tools
+  uat_expect_exit 2 "mcp → --clusters and --clusters-from are mutually exclusive"
+  uat_expect_stderr 'mutually exclusive' "mcp → --clusters + --clusters-from explains exclusivity"
+  uat_run_mcp --clusters-from=auto --kubeconfig=/dev/null --list-tools
+  uat_expect_exit 2 "mcp → --clusters-from=auto rejects --kubeconfig"
+  uat_expect_stderr '--kubeconfig' "mcp → --clusters-from + --kubeconfig names --kubeconfig"
+  uat_run_mcp --listen=127.0.0.1:0 --google-client-id=c --google-allow=@x.example --resource-url=https://l.example/mcp --clusters-from=auto --store=/dev/null --list-tools
+  uat_expect_exit 2 "mcp → Google-token multi-cluster rejects --store"
+  uat_expect_stderr '--store and --report' "mcp → Google-token multi-cluster --store names the restriction"
+  uat_run_mcp --listen=127.0.0.1:0 --google-client-id=c --google-allow=@x.example --resource-url=https://l.example/mcp --clusters-from=auto --report=/dev/null --list-tools
+  uat_expect_exit 2 "mcp → Google-token multi-cluster rejects --report"
+  uat_expect_stderr '--store and --report' "mcp → Google-token multi-cluster --report names the restriction"
+
+  # Unknown profile or unknown tool name is a usage error, not a silently empty surface.
+  uat_run_mcp --profile=no_such_profile --list-tools
+  uat_expect_exit 2 "mcp → --profile with an unknown name is a usage error"
+  uat_expect_stderr 'no_such_profile' "mcp → unknown profile names the bad value"
+  uat_run_mcp --tools=k8s_no_such_tool --list-tools
   uat_expect_exit 2 "mcp → --tools with an unknown name is a usage error"
+  uat_expect_stderr 'k8s_no_such_tool' "mcp → unknown tool names the bad value"
 }

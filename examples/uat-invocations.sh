@@ -27,11 +27,12 @@
 # Part 3 of docs/testing/cli-uat.md — the cross-cutting contract, run
 # against EVERY read-path command rather than a chosen few.
 #
-# The command list comes from `mcp --list-tools`, i.e. the registry the
-# MCP server, `--help` and the site Reference pages are all generated
-# from. That is the whole design: a check added next month is in this
-# harness the moment it is registered, and if nobody gave it a valid
-# invocation the run FAILS rather than quietly covering 34 of 35.
+# The command list comes from `mcp --store=/dev/null --exemptions=/dev/null
+# --list-tools` (via `uat_read_commands`), i.e. the full non-privileged
+# registry the MCP server, `--help` and the site Reference pages are all
+# generated from. That is the whole design: a check added next month is in
+# this harness the moment it is registered, and if nobody gave it a valid
+# invocation the run FAILS rather than quietly covering 42 of 43.
 # Silent under-coverage is the failure mode a contract harness exists to
 # prevent, so it is the one thing here that is never a warning.
 

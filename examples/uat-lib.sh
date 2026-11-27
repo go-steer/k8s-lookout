@@ -194,7 +194,7 @@ uat_expect_json() {
 # uat_expect_stdout <extended-regexp> [description]
 uat_expect_stdout() {
   local pattern="$1" desc="${2:-$UAT_CMD → /$1/}"
-  if grep -Eq "$pattern" <<<"$UAT_OUT"; then
+  if grep -Eq -- "$pattern" <<<"$UAT_OUT"; then
     uat_ok "$desc"
     return 0
   fi
@@ -207,7 +207,7 @@ uat_expect_stdout() {
 # deliberately does NOT echo the matching line.
 uat_refute_stdout() {
   local pattern="$1" desc="${2:-$UAT_CMD → NOT /$1/}"
-  if grep -Eq "$pattern" <<<"$UAT_OUT"; then
+  if grep -Eq -- "$pattern" <<<"$UAT_OUT"; then
     uat_bad "$desc" "stdout matched /$pattern/ (match withheld — it may be the secret)"
     return 1
   fi
@@ -219,7 +219,7 @@ uat_refute_stdout() {
 # and refusal messages, which are diagnostics and belong on stderr.
 uat_expect_stderr() {
   local pattern="$1" desc="${2:-$UAT_CMD → stderr /$1/}"
-  if grep -Eq "$pattern" <<<"$UAT_ERR"; then
+  if grep -Eq -- "$pattern" <<<"$UAT_ERR"; then
     uat_ok "$desc"
     return 0
   fi
@@ -305,16 +305,53 @@ uat_fixtures_revert() {
 
 # ---- the command registry -------------------------------------------------
 
+# Ambient auth/fleet auto-scope env vars stripped from UAT `lookout mcp`
+# invocations so a caller's shell (e.g. an Agent Substrate task or a
+# workstation with LOOKOUT_CLUSTERS_FROM set) cannot flip single-cluster
+# UAT checks into multi-cluster mode.
+UAT_MCP_CLEAN_ENV=(
+  -u LOOKOUT_GOOGLE_AUTH
+  -u CORE_AGENT_GOOGLE_AUTH
+  -u MAST_GOOGLE_AUTH
+  -u CREDENTIAL_PROXY_URL
+  -u LOOKOUT_CLUSTERS_FROM
+)
+
+# uat_mcp_clean <args...> — run `lookout mcp` in the foreground with
+# ambient auth/fleet auto-scope env vars stripped. Background servers
+# should exec `env "${UAT_MCP_CLEAN_ENV[@]}" "$bin" mcp ... &` directly
+# so `$!` is the server PID rather than a wrapper subshell.
+uat_mcp_clean() {
+  env "${UAT_MCP_CLEAN_ENV[@]}" "$(lookout_bin)" mcp "$@"
+}
+
+# uat_run_mcp <args...> — uat_run for `lookout mcp` under uat_mcp_clean.
+uat_run_mcp() {
+  UAT_CMD="lookout mcp $*"
+  local err_file
+  err_file="$(mktemp)"
+  set +e
+  UAT_OUT="$(uat_mcp_clean "$@" 2>"$err_file")"
+  UAT_RC=$?
+  set -e
+  UAT_ERR="$(cat "$err_file")"
+  rm -f "$err_file"
+}
+
 # uat_read_commands — every read-path check, as its CLI command path,
 # one per line ("state edges", "triage delta", …).
 #
-# Derived from `mcp --list-tools`, which prints the tool registry: the
-# same source the MCP server, the site Reference pages and `--help` are
-# generated from. A hand-written list here would go stale the first
-# time someone adds a command, and the whole point of this layer is to
-# be the thing that notices.
+# Derived from `mcp --store=/dev/null --exemptions=/dev/null --list-tools`,
+# which prints the full non-privileged tool registry: the same source the
+# MCP server, the site Reference pages and `--help` are generated from.
+# Bare `mcp --list-tools` omits server-flag-gated tools (`k8s_findings_diff`
+# without `--store`, `k8s_audit_exemptions` without `--exemptions`; #867,
+# docs/DESIGN.md §4.3); passing `/dev/null` enumerates every read-path CLI
+# command without opening either file (`--list-tools` exits before serve).
+# A hand-written list here would go stale the first time someone adds a
+# command, and the whole point of this layer is to be the thing that notices.
 uat_read_commands() {
-  run_lookout mcp --list-tools 2>/dev/null |
+  uat_mcp_clean --store=/dev/null --exemptions=/dev/null --list-tools 2>/dev/null |
     awk '$1 ~ /^k8s_/ { $1=""; $2=""; sub(/^ +/, ""); print }'
 }
 
@@ -333,7 +370,7 @@ uat_accepts_flag() {
 # k8s_admission_webhooks, so anything pairing a CLI command with its
 # tool has to read the mapping rather than derive it.
 uat_tool_names() {
-  run_lookout mcp --list-tools 2>/dev/null |
+  uat_mcp_clean --store=/dev/null --exemptions=/dev/null --list-tools 2>/dev/null |
     awk '$1 ~ /^k8s_/ { name=$1; $1=""; $2=""; sub(/^ +/, ""); print name, $0 }'
 }
 
@@ -351,12 +388,13 @@ UAT_MCP_LOG=""
 # port and complete the handshake. Returns non-zero if it never came
 # up, so a case can report that once instead of failing every call.
 uat_mcp_start() {
-  local port
+  local port bin
   port="$(uat_free_port)"
+  bin="$(lookout_bin)"
   UAT_MCP_URL="http://127.0.0.1:$port"
   UAT_MCP_LOG="$UAT_WORKDIR/mcp-$port.log"
 
-  "$(lookout_bin)" mcp --listen="127.0.0.1:$port" "$@" >"$UAT_MCP_LOG" 2>&1 &
+  env "${UAT_MCP_CLEAN_ENV[@]}" "$bin" mcp --listen="127.0.0.1:$port" "$@" >"$UAT_MCP_LOG" 2>&1 &
   UAT_MCP_PID=$!
 
   local i
@@ -370,7 +408,10 @@ uat_mcp_start() {
     kill -0 "$UAT_MCP_PID" 2>/dev/null || break
     sleep 0.2
   done
-  [[ -n "$UAT_MCP_SID" ]] || return 1
+  if [[ -z "$UAT_MCP_SID" ]]; then
+    uat_mcp_stop || true
+    return 1
+  fi
 
   uat_mcp_raw '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
 }
