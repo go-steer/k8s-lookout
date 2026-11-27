@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Restore full-registry enumeration in CLI UAT and add `--list-tools` flag-combination matrix coverage (`examples/uat-lib.sh`, `examples/uat-cases/10-mcp.sh`, `cmd/lookout/mcp_test.go`, #867).**
+  - Updates `uat_read_commands` and `uat_tool_names` in `examples/uat-lib.sh` to invoke `lookout mcp --store=/dev/null --exemptions=/dev/null --list-tools` so `00-contract.sh` and `10-mcp.sh` enumerate all 43 read-path CLI commands (including `findings diff` and `audit exemptions`, which bare `--list-tools` intentionally omits after `#867`).
+  - Expands `examples/uat-cases/10-mcp.sh` and adds `TestMCPListTools_FlagMatrix` in `cmd/lookout/mcp_test.go` covering the full `--list-tools` and live `tools/list` combination matrix across `--exemptions`, `--store`, `--probe-from-image`, `--profile`, `--tools`, `--clusters` / `--clusters-from=auto`, `--google-auth=injected` / `--kubeconfig` / `--context`, and live `#867` default-scope and stripped-property behavior.
+
 ## [0.46.0] - 2026-11-26
 
 **This release improves `lookout mcp` ergonomics for interactive and flat-agent callers (#867).** MCP errors drop CLI `--help` hints and translate flag names to JSON property names; namespace-scoped audit tools default to `all_namespaces: true` over MCP; inapplicable scope properties (`namespace`, `all_namespaces`, `workload`, `since`) are omitted from tool schemas and rejected cleanly; unconfigured server-flag tools (`k8s_audit_exemptions` without `--exemptions`, `k8s_findings_diff` without `--store`) are hidden from advertising; single-caller stdio queues excess per-cluster calls instead of rejecting them; non-timeline responses sort worst-first by severity before `--max-response-bytes` truncation; and multi-cluster elicitation emits structured `elicit=cluster` access-log entries.

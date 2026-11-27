@@ -822,11 +822,11 @@ cost stack.
 
 The **cross-cutting** checks (Part 3) are enumerated from the command
 registry rather than a list kept by hand: `uat-cases/00-contract.sh`
-reads `lookout mcp --list-tools` and asserts the generic contract
-against every command it finds. It carries a guard in both directions —
-a newly registered command with no invocation in the table fails the
-run, as does a table entry for a command that no longer exists. That is
-what keeps this checklist from quietly going stale.
+reads `lookout mcp --store=/dev/null --exemptions=/dev/null --list-tools`
+and asserts the generic contract against every command it finds. It carries
+a guard in both directions — a newly registered command with no invocation
+in the table fails the run, as does a table entry for a command that no
+longer exists. That is what keeps this checklist from quietly going stale.
 
 The **MCP surface** (Part 4) is checked by replaying those same
 invocations — from the shared table in `examples/uat-invocations.sh` —

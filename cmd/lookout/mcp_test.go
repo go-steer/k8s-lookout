@@ -18,9 +18,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -515,6 +517,450 @@ func TestMCPWithReportPinsReportAndRejectsClientOverride(t *testing.T) {
 	}
 	if res.IsError {
 		t.Fatalf("k8s_findings_diff tool error: %v", res.Content)
+	}
+}
+
+func parseListedTools(out string) []string {
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && strings.HasPrefix(fields[0], "k8s_") {
+			names = append(names, fields[0])
+		}
+	}
+	return names
+}
+
+// TestMCPListTools_FlagMatrix exercises the CLI flag combinations that
+// shape `lookout mcp --list-tools` (server-scoped path flags, profiles,
+// left-to-right --tools selections, --probe-from-image, multi-cluster
+// flags, and injected-auth env auto-scope) and verifies live MCP
+// `tools/list` parity for each server-flag combination (#867).
+func TestMCPListTools_FlagMatrix(t *testing.T) {
+	// Clear ambient auth/fleet env vars so every subtest controls its own
+	// environment hermetically.
+	for _, k := range []string{
+		"LOOKOUT_GOOGLE_AUTH",
+		"CORE_AGENT_GOOGLE_AUTH",
+		"MAST_GOOGLE_AUTH",
+		"CREDENTIAL_PROXY_URL",
+		"LOOKOUT_CLUSTERS_FROM",
+	} {
+		t.Setenv(k, "")
+	}
+
+	var allRead, defaultRead, auditDefault, triageDefault int
+	for _, c := range checks.All() {
+		if c.Hidden || c.Privileged {
+			continue
+		}
+		allRead++
+		if c.MCPRequiresServerFlag == "" {
+			defaultRead++
+		}
+		if slices.Contains(c.MCPProfiles, "audit") && c.MCPRequiresServerFlag == "" {
+			auditDefault++
+		}
+		if slices.Contains(c.MCPProfiles, "triage") && c.MCPRequiresServerFlag == "" {
+			triageDefault++
+		}
+	}
+	if allRead != defaultRead+2 {
+		t.Fatalf("expected exactly 2 server-flag-gated tools (exemptions, store); allRead=%d defaultRead=%d", allRead, defaultRead)
+	}
+
+	const probeImg = "ghcr.io/go-steer/lookout@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+	tests := []struct {
+		name      string
+		env       map[string]string
+		args      []string
+		wantCode  int
+		wantCount int
+		wantHas   []string
+		wantLack  []string
+		wantErr   string
+	}{
+		// 2x2 server-scoped path flag matrix.
+		{
+			name:      "bare omits server-flag and privileged tools",
+			args:      []string{"--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead,
+			wantHas:   []string{"k8s_triage_status", "k8s_cluster_health", "k8s_findings_ack", "k8s_audit_all"},
+			wantLack:  []string{"k8s_audit_exemptions", "k8s_findings_diff", "k8s_net_probe_from", "k8s_list_clusters"},
+		},
+		{
+			name:      "exemptions only adds k8s_audit_exemptions",
+			args:      []string{"--exemptions=/dev/null", "--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead + 1,
+			wantHas:   []string{"k8s_audit_exemptions"},
+			wantLack:  []string{"k8s_findings_diff", "k8s_net_probe_from", "k8s_list_clusters"},
+		},
+		{
+			name:      "store only adds k8s_findings_diff",
+			args:      []string{"--store=/dev/null", "--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead + 1,
+			wantHas:   []string{"k8s_findings_diff"},
+			wantLack:  []string{"k8s_audit_exemptions", "k8s_net_probe_from", "k8s_list_clusters"},
+		},
+		{
+			name:      "exemptions and store restore full read-path registry",
+			args:      []string{"--exemptions=/dev/null", "--store=/dev/null", "--list-tools"},
+			wantCode:  0,
+			wantCount: allRead,
+			wantHas:   []string{"k8s_audit_exemptions", "k8s_findings_diff"},
+			wantLack:  []string{"k8s_net_probe_from", "k8s_list_clusters"},
+		},
+		// --profile x server-scoped flags x --tools.
+		{
+			name:      "profile audit without exemptions omits k8s_audit_exemptions",
+			args:      []string{"--profile=audit", "--list-tools"},
+			wantCode:  0,
+			wantCount: auditDefault,
+			wantHas:   []string{"k8s_audit_all"},
+			wantLack:  []string{"k8s_audit_exemptions", "k8s_findings_diff"},
+		},
+		{
+			name:      "profile audit with exemptions adds k8s_audit_exemptions",
+			args:      []string{"--profile=audit", "--exemptions=/dev/null", "--list-tools"},
+			wantCode:  0,
+			wantCount: auditDefault + 1,
+			wantHas:   []string{"k8s_audit_all", "k8s_audit_exemptions"},
+			wantLack:  []string{"k8s_findings_diff"},
+		},
+		{
+			name:      "profile audit with store only stays unchanged",
+			args:      []string{"--profile=audit", "--store=/dev/null", "--list-tools"},
+			wantCode:  0,
+			wantCount: auditDefault,
+			wantLack:  []string{"k8s_audit_exemptions", "k8s_findings_diff"},
+		},
+		{
+			name:      "profile triage with store adds k8s_findings_diff",
+			args:      []string{"--profile=triage", "--store=/dev/null", "--list-tools"},
+			wantCode:  0,
+			wantCount: triageDefault + 1,
+			wantHas:   []string{"k8s_findings_diff"},
+			wantLack:  []string{"k8s_audit_exemptions"},
+		},
+		{
+			name:      "profile triage with exemptions only stays unchanged",
+			args:      []string{"--profile=triage", "--exemptions=/dev/null", "--list-tools"},
+			wantCode:  0,
+			wantCount: triageDefault,
+			wantLack:  []string{"k8s_audit_exemptions", "k8s_findings_diff"},
+		},
+		{
+			name:      "profile triage minus k8s_triage_logs",
+			args:      []string{"--profile=triage", "--tools=-k8s_triage_logs", "--list-tools"},
+			wantCode:  0,
+			wantCount: triageDefault - 1,
+			wantLack:  []string{"k8s_triage_logs", "k8s_audit_exemptions", "k8s_findings_diff"},
+		},
+		{
+			name:      "tools=all without server flags matches bare default",
+			args:      []string{"--tools=all", "--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead,
+			wantLack:  []string{"k8s_audit_exemptions", "k8s_findings_diff"},
+		},
+		{
+			name:      "tools=full with both server flags matches full registry",
+			args:      []string{"--exemptions=/dev/null", "--store=/dev/null", "--tools=full", "--list-tools"},
+			wantCode:  0,
+			wantCount: allRead,
+			wantHas:   []string{"k8s_audit_exemptions", "k8s_findings_diff"},
+		},
+		{
+			name:      "subtracting omitted k8s_audit_exemptions is a valid no-op",
+			args:      []string{"--profile=audit", "--tools=-k8s_audit_exemptions", "--list-tools"},
+			wantCode:  0,
+			wantCount: auditDefault,
+			wantLack:  []string{"k8s_audit_exemptions"},
+		},
+		{
+			name:      "subtracting omitted k8s_findings_diff is a valid no-op",
+			args:      []string{"--tools=all,-k8s_findings_diff", "--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead,
+			wantLack:  []string{"k8s_findings_diff"},
+		},
+		{
+			name:     "explicit k8s_audit_exemptions without --exemptions fails",
+			args:     []string{"--tools=k8s_audit_exemptions", "--list-tools"},
+			wantCode: 2,
+			wantErr:  "--exemptions",
+		},
+		{
+			name:     "explicit k8s_findings_diff without --store fails",
+			args:     []string{"--tools=k8s_findings_diff", "--list-tools"},
+			wantCode: 2,
+			wantErr:  "--store",
+		},
+		{
+			name:      "explicit k8s_audit_exemptions with --exemptions advertises 1 tool",
+			args:      []string{"--exemptions=/dev/null", "--tools=k8s_audit_exemptions", "--list-tools"},
+			wantCode:  0,
+			wantCount: 1,
+			wantHas:   []string{"k8s_audit_exemptions"},
+		},
+		{
+			name:      "explicit k8s_findings_diff with --store advertises 1 tool",
+			args:      []string{"--store=/dev/null", "--tools=k8s_findings_diff", "--list-tools"},
+			wantCode:  0,
+			wantCount: 1,
+			wantHas:   []string{"k8s_findings_diff"},
+		},
+		// Privileged --probe-from-image interactions.
+		{
+			name:      "probe-from-image bare adds k8s_net_probe_from without server-flag tools",
+			args:      []string{"--probe-from-image=" + probeImg, "--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead + 1,
+			wantHas:   []string{"k8s_net_probe_from"},
+			wantLack:  []string{"k8s_audit_exemptions", "k8s_findings_diff"},
+		},
+		{
+			name:      "probe-from-image with exemptions and store adds k8s_net_probe_from to full registry",
+			args:      []string{"--probe-from-image=" + probeImg, "--exemptions=/dev/null", "--store=/dev/null", "--list-tools"},
+			wantCode:  0,
+			wantCount: allRead + 1,
+			wantHas:   []string{"k8s_net_probe_from", "k8s_audit_exemptions", "k8s_findings_diff"},
+		},
+		{
+			name:      "probe-from-image with profile=triage adds k8s_net_probe_from",
+			args:      []string{"--profile=triage", "--probe-from-image=" + probeImg, "--list-tools"},
+			wantCode:  0,
+			wantCount: triageDefault + 1,
+			wantHas:   []string{"k8s_net_probe_from"},
+		},
+		{
+			name:     "tag-only probe-from-image fails",
+			args:     []string{"--probe-from-image=ghcr.io/go-steer/lookout:latest", "--list-tools"},
+			wantCode: 2,
+			wantErr:  "--probe-from-image",
+		},
+		{
+			name:     "tools=k8s_net_probe_from without --probe-from-image fails",
+			args:     []string{"--tools=k8s_net_probe_from", "--list-tools"},
+			wantCode: 2,
+			wantErr:  "k8s_net_probe_from",
+		},
+		// Multi-cluster flags and env auto-scope.
+		{
+			name:      "clusters flag adds k8s_list_clusters",
+			args:      []string{"--clusters=a=https://a", "--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead + 1,
+			wantHas:   []string{"k8s_list_clusters"},
+			wantLack:  []string{"k8s_audit_exemptions", "k8s_findings_diff"},
+		},
+		{
+			name:      "clusters-from=auto with tools=k8s_audit_all advertises 2 tools",
+			args:      []string{"--clusters-from=auto", "--tools=k8s_audit_all", "--list-tools"},
+			wantCode:  0,
+			wantCount: 2,
+			wantHas:   []string{"k8s_list_clusters", "k8s_audit_all"},
+		},
+		{
+			name:      "clusters-from=auto with exemptions adds k8s_list_clusters and k8s_audit_exemptions",
+			args:      []string{"--clusters-from=auto", "--exemptions=/dev/null", "--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead + 2,
+			wantHas:   []string{"k8s_list_clusters", "k8s_audit_exemptions"},
+			wantLack:  []string{"k8s_findings_diff"},
+		},
+		{
+			name:      "clusters-from=auto with store adds k8s_list_clusters and k8s_findings_diff",
+			args:      []string{"--clusters-from=auto", "--store=/dev/null", "--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead + 2,
+			wantHas:   []string{"k8s_list_clusters", "k8s_findings_diff"},
+			wantLack:  []string{"k8s_audit_exemptions"},
+		},
+		{
+			name:     "clusters and clusters-from are mutually exclusive",
+			args:     []string{"--clusters=a=https://a", "--clusters-from=auto", "--list-tools"},
+			wantCode: 2,
+			wantErr:  "mutually exclusive",
+		},
+		{
+			name:     "clusters-from=auto rejects --kubeconfig",
+			args:     []string{"--clusters-from=auto", "--kubeconfig=/dev/null", "--list-tools"},
+			wantCode: 2,
+			wantErr:  "--kubeconfig",
+		},
+		{
+			name:     "clusters-from=auto rejects --context",
+			args:     []string{"--clusters-from=auto", "--context=kind-lookout", "--list-tools"},
+			wantCode: 2,
+			wantErr:  "--context",
+		},
+		{
+			name: "google-token multi-cluster rejects --store",
+			args: []string{
+				"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
+				"--resource-url=https://l.example/mcp", "--clusters-from=auto", "--store=/dev/null", "--list-tools",
+			},
+			wantCode: 2,
+			wantErr:  "--store and --report",
+		},
+		{
+			name: "google-token multi-cluster rejects --report",
+			args: []string{
+				"--listen=127.0.0.1:0", "--google-client-id=c", "--google-allow=@x.example",
+				"--resource-url=https://l.example/mcp", "--clusters-from=auto", "--report=/dev/null", "--list-tools",
+			},
+			wantCode: 2,
+			wantErr:  "--store and --report",
+		},
+		{
+			name:      "google-auth=injected CLI flag auto-enables multi-cluster",
+			args:      []string{"--google-auth=injected", "--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead + 1,
+			wantHas:   []string{"k8s_list_clusters"},
+		},
+		{
+			name:      "google-auth=adc overrides LOOKOUT_GOOGLE_AUTH=injected",
+			env:       map[string]string{"LOOKOUT_GOOGLE_AUTH": "injected"},
+			args:      []string{"--google-auth=adc", "--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead,
+			wantLack:  []string{"k8s_list_clusters"},
+		},
+		{
+			name:      "LOOKOUT_GOOGLE_AUTH=injected auto-enables multi-cluster",
+			env:       map[string]string{"LOOKOUT_GOOGLE_AUTH": "injected"},
+			args:      []string{"--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead + 1,
+			wantHas:   []string{"k8s_list_clusters"},
+		},
+		{
+			name:      "LOOKOUT_GOOGLE_AUTH=injected with --kubeconfig stays single-cluster",
+			env:       map[string]string{"LOOKOUT_GOOGLE_AUTH": "injected"},
+			args:      []string{"--kubeconfig=/dev/null", "--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead,
+			wantLack:  []string{"k8s_list_clusters"},
+		},
+		{
+			name:      "LOOKOUT_GOOGLE_AUTH=injected with --context stays single-cluster",
+			env:       map[string]string{"LOOKOUT_GOOGLE_AUTH": "injected"},
+			args:      []string{"--context=kind-lookout", "--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead,
+			wantLack:  []string{"k8s_list_clusters"},
+		},
+		{
+			name:      "CREDENTIAL_PROXY_URL auto-enables multi-cluster",
+			env:       map[string]string{"CREDENTIAL_PROXY_URL": "http://127.0.0.1:9999"},
+			args:      []string{"--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead + 1,
+			wantHas:   []string{"k8s_list_clusters"},
+		},
+		{
+			name:      "LOOKOUT_CLUSTERS_FROM=auto env auto-enables multi-cluster",
+			env:       map[string]string{"LOOKOUT_CLUSTERS_FROM": "auto"},
+			args:      []string{"--list-tools"},
+			wantCode:  0,
+			wantCount: defaultRead + 1,
+			wantHas:   []string{"k8s_list_clusters"},
+		},
+		{
+			name:     "unknown profile fails",
+			args:     []string{"--profile=no_such_profile", "--list-tools"},
+			wantCode: 2,
+			wantErr:  "no_such_profile",
+		},
+		{
+			name:     "unknown tool fails",
+			args:     []string{"--tools=k8s_no_such_tool", "--list-tools"},
+			wantCode: 2,
+			wantErr:  "k8s_no_such_tool",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			var stdout, stderr bytes.Buffer
+			got := mcpMain(t.Context(), tc.args, &stdout, &stderr)
+			if got != tc.wantCode {
+				t.Fatalf("mcpMain(%v) exit = %d, want %d\nstdout:\n%s\nstderr:\n%s",
+					tc.args, got, tc.wantCode, stdout.String(), stderr.String())
+			}
+			if tc.wantCode != 0 {
+				if stdout.Len() != 0 {
+					t.Errorf("error path wrote to stdout: %q", stdout.String())
+				}
+				if tc.wantErr != "" && !strings.Contains(stderr.String(), tc.wantErr) {
+					t.Errorf("stderr %q does not contain %q", stderr.String(), tc.wantErr)
+				}
+				return
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("--list-tools wrote unexpected stderr: %q", stderr.String())
+			}
+			tools := parseListedTools(stdout.String())
+			if len(tools) != tc.wantCount {
+				t.Errorf("listed %d tools, want %d\nstdout:\n%s", len(tools), tc.wantCount, stdout.String())
+			}
+			wantFooter := fmt.Sprintf("%d tools", tc.wantCount)
+			if !strings.Contains(stdout.String(), wantFooter) {
+				t.Errorf("footer missing %q in:\n%s", wantFooter, stdout.String())
+			}
+			for _, want := range tc.wantHas {
+				if !slices.Contains(tools, want) {
+					t.Errorf("expected tool %q to be listed; got %v", want, tools)
+				}
+			}
+			for _, lack := range tc.wantLack {
+				if slices.Contains(tools, lack) {
+					t.Errorf("expected tool %q to be omitted; got %v", lack, tools)
+				}
+			}
+		})
+	}
+
+	// Verify live MCP `tools/list` matches `--list-tools` across all four
+	// server-scoped flag combinations so the two surfaces cannot drift.
+	parityCases := []struct {
+		name string
+		args []string
+		opts []mcpserver.Option
+	}{
+		{"neither", []string{"--list-tools"}, nil},
+		{"exemptions only", []string{"--exemptions=/dev/null", "--list-tools"}, []mcpserver.Option{mcpserver.WithExemptions("/dev/null")}},
+		{"store only", []string{"--store=/dev/null", "--list-tools"}, []mcpserver.Option{mcpserver.WithStore("/dev/null")}},
+		{"both", []string{"--exemptions=/dev/null", "--store=/dev/null", "--list-tools"}, []mcpserver.Option{mcpserver.WithExemptions("/dev/null"), mcpserver.WithStore("/dev/null")}},
+	}
+	for _, pc := range parityCases {
+		t.Run("live_parity_"+pc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := mcpMain(t.Context(), pc.args, &stdout, &stderr); code != 0 {
+				t.Fatalf("mcpMain(%v) exit = %d, stderr: %s", pc.args, code, stderr.String())
+			}
+			listed := parseListedTools(stdout.String())
+			slices.Sort(listed)
+
+			res := listToolsFor(t, mcpserver.New(checks.Default(), version.Semver(), pc.opts...))
+			served := make([]string, 0, len(res.Tools))
+			for _, tool := range res.Tools {
+				served = append(served, tool.Name)
+			}
+			slices.Sort(served)
+			if !slices.Equal(listed, served) {
+				t.Errorf("--list-tools != live tools/list:\nlisted=%v\nserved=%v", listed, served)
+			}
+		})
 	}
 }
 
